@@ -14,7 +14,7 @@ Fuente única de lo que calco no demuestra o no hace. Ningún otro archivo los r
 - La exactitud de instrucción se demuestra contra un solo CPU (AMD Ryzen 5 5600G, Zen 3). En un CPU de otro fabricante o generación, las flags indefinidas y algunas decodificaciones pueden diferir; nada se midió fuera de esa máquina.
 - La comparación aleatoria aplica una máscara de flags indefinidas tomada del manual; el modo estricto es solo informativo.
 - Del estado x87 no se comparan FIP, FCS, FDP, FDS ni FOP: el puntero de la última instrucción x87 apunta a la caché de código.
-- RDTSC, RDTSCP, RDRAND, RDSEED, RCPPS, RCPSS, RSQRTPS, RSQRTSS y CPUID quedan fuera del generador aleatorio; solo se comprueba que corren sin error.
+- RDTSC, RDTSCP, RDRAND, RCPPS, RCPSS, RSQRTPS, RSQRTSS y CPUID quedan fuera del generador aleatorio; solo se comprueba que corren sin error.
 
 ## Sistema
 

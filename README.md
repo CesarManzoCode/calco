@@ -23,7 +23,7 @@ target/release/calco ./programa args...
 
 | Fase | Contenido | Estado |
 | --- | --- | --- |
-| K0 | Fundación: contrato, investigación, plan y comando de chequeo | Cerrado |
+| K0 | Fundación: contrato, investigación, plan y comando de chequeo | Terminado |
 | K1 | Núcleo y arnés: carga de ELF estáticos, decodificador, JIT, CPUID, comparación contra el CPU, pruebas ISA de QEMU | Pendiente |
 | K2 | Sistema: llamadas al sistema, señales, hilos, código automodificable, ELF dinámicos | Pendiente |
 | K3 | Programas reales y rendimiento: busybox, SQLite, Lua, TCC, medición contra qemu-x86_64 | Pendiente |

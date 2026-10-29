@@ -115,7 +115,7 @@ Módulos del crate (nombres fijos para que los prompts se entiendan entre sí):
 
 ### 3.9 CPUID
 
-- [diseño] `cpuid.rs` ejecuta el CPUID del anfitrión y filtra. Se anuncian solo: hojas 0, 1, 7 (subhoja 0), `0x80000000`, `0x80000001`, `0x80000002–4` (nombre), y las demás devuelven ceros. Bits que quedan, si el anfitrión los tiene: hoja 1 EDX = FPU TSC CX8 CMOV MMX FXSR SSE SSE2 (y los informativos PSE, PAE, PGE, CLFSH); hoja 1 ECX = SSE3 PCLMULQDQ SSSE3 CX16 SSE4.1 SSE4.2 POPCNT RDRAND; hoja 7 EBX/ECX/EDX = 0; `0x80000001` ECX = LAHF/SAHF, EDX = SYSCALL NX LM.
+- [diseño] `cpuid.rs` ejecuta el CPUID del anfitrión y filtra. Hojas con bits de función que se filtran: 1, 7 (todas las subhojas) y `0x80000001`. Hojas informativas sin bits de función que pasan tal cual: 0 (con la hoja máxima del anfitrión), 4, `0xB`, `0x80000000`, `0x80000002–4` (nombre), `0x80000005`, `0x80000006`, `0x80000008`, `0x8000001D`, `0x8000001E` (glibc las usa para tamaños de caché). Cualquier otra hoja, incluida `0xD` (XSAVE), devuelve ceros. Bits que quedan, si el anfitrión los tiene: hoja 1 EDX = FPU TSC CX8 CMOV MMX FXSR SSE SSE2 (y los informativos PSE, PAE, PGE, CLFSH); hoja 1 ECX = SSE3 PCLMULQDQ SSSE3 CX16 SSE4.1 SSE4.2 POPCNT RDRAND; hoja 7 EBX/ECX/EDX = 0; `0x80000001` ECX = LAHF/SAHF, EDX = SYSCALL NX RDTSCP LM.
 - [diseño] Se borran explícitamente AVX, OSXSAVE, XSAVE, F16C, FMA, MOVBE, AES, AVX2, BMI1/2, ADX, AVX-512, SHA, FSGSBASE, CET (SHSTK/IBT), LZCNT/ABM y SSE4A. `arch_prctl(ARCH_SHSTK_*)` devuelve `-EINVAL`.
 - [hecho] glibc 2.44 de esta máquina elige rutinas según el CPUID que ve: bajo `qemu-x86_64 -cpu Nehalem`, `ld.so --help` deja de listar `x86-64-v3` como soportado y `--list-diagnostics` da `AVX_Fast_Unaligned_Load=0x0`; en nativo da `x86-64-v3 (supported)` y `0x1`.
 
@@ -162,7 +162,7 @@ Módulos del crate (nombres fijos para que los prompts se entiendan entre sí):
 
 - `isa/scope.tsv`: columnas `mnemonic` (nombre de `objdump -M intel`), `ext` (`base`, `x87`, `mmx`, `sse`, `sse2`, `sse3`, `ssse3`, `sse4.1`, `sse4.2`), `forms` (plantillas de operandos), `flags_read`, `flags_written`, `flags_undefined`, `ref` (sección del manual). Es la definición del alcance.
 - `harness/undefined_flags.tsv`: `mnemonic`, `undefined` (flags), `ref` (AMD64 APM Vol. 3, pub. 24594, y la sección; Intel SDM Vol. 2 como segunda referencia). La revisión del manual consultado va en la cabecera del archivo.
-- `harness/exclusions.tsv`: `mnemonic`, `reason`. Contiene al menos `rdtsc rdtscp rdrand rdseed rcpps rcpss rsqrtps rsqrtss cpuid syscall` y las privilegiadas. El generador no las emite.
+- `harness/exclusions.tsv`: `mnemonic`, `reason`. Contiene al menos `rdtsc rdtscp rdrand rcpps rcpss rsqrtps rsqrtss cpuid syscall` y las privilegiadas. RDSEED no está en el alcance (CPUID no lo anuncia). El generador no las emite.
 - `harness/mutants.tsv`: `feature`, `description`.
 
 ### 4.3 Generador
@@ -214,7 +214,7 @@ Todos los scripts se corren como `python3 scripts/<nombre>.py` desde la raíz de
 | Reducción | `reduce_check.py`: reduce un contraejemplo de cada mutante; cada uno sigue fallando y tiene ≤ 3 instrucciones | K1 |
 | Cobertura | `coverage.py`: desensambla con `objdump -d -M intel` los ELF generados, imprime los mnemónicos de `isa/scope.tsv` sin cubrir y sale con 0 solo si no hay | K1 |
 | qemu como dato | `random_compare.py` también imprime `qemu-x86_64 discrepancias: <n>` (informativo) | K1 |
-| No deterministas excluidas | `nondet_check.py`: el generador no emite nada de `harness/exclusions.tsv` y `guests/nondet.c` (RDTSC, RDRAND, RCPPS, RSQRTPS) corre bajo calco con código 0 | K1 |
+| No deterministas excluidas | `nondet_check.py`: el generador no emite nada de `harness/exclusions.tsv` y `guests/nondet.c` (RDTSC, RDTSCP, RDRAND, RCPPS, RSQRTPS) corre bajo calco con código 0 | K1 |
 | Código del invitado no ejecutable | `noexec.py`: lanza `guests/pause.c` (imprime `ready` y bloquea en `read(0)`), lee `/proc/PID/maps` de calco; imprime `codigo-invitado-no-ejecutable` | K1 |
 | CPUID sin AVX, AVX → SIGILL | `cpuid_avx.py`: `guests/avx.c` imprime los bits de CPUID y ejecuta `vaddps`; salida igual a `guests/avx.expected` y muerte por SIGILL | K1 |
 | test-x86_64 | `qemu_tcg.py test-x86_64`: compila `test-i386.c` con `-Wall -O0 -g -fno-strict-aliasing -static … -lm -lc` (banderas de QEMU) en `build/qemu-tcg/` y compara con nativo | K1 |
@@ -237,7 +237,7 @@ Reglas de conteo de `loc.py` (las mismas que usa el checker): se cuentan líneas
 
 Casos de señales (`guests/signals.c`): SIGSEGV por escritura a una página sin permiso con un manejador `SA_SIGINFO` que imprime `si_addr`, el `rip` del `ucontext` como desplazamiento respecto a una etiqueta y cuatro registros fijados antes, corrige el contexto (salta la instrucción) y continúa; SIGILL por `ud2`; SIGFPE por división entera entre cero; SIGALRM de `setitimer` en mitad de un bucle de solo registros que mantiene un invariante: el manejador imprime si el `rip` cae dentro del bucle y si el invariante se cumple, no los valores (que dependen del momento).
 
-Busybox: `targets/busybox/cases.tsv` fija al menos 25 applets con entradas en `targets/busybox/inputs/`. La suite propia (`testsuite/runtest` de busybox) se corre con el binario bajo calco mediante un directorio de enlaces a un envoltorio `exec calco --argv0 "$0" busybox "$@"`; el subconjunto válido es el de las pruebas que pasan en nativo como usuario sin root ni red en dos corridas nativas seguidas, y se congela en `targets/busybox/suite.list`. Se compara el número de `PASS:`.
+Busybox: `targets/busybox/cases.tsv` fija al menos 25 applets con entradas en `targets/busybox/inputs/`. Formato: una línea por caso, separada por tabuladores, `stdin<TAB>applet<TAB>arg1<TAB>arg2…`, donde `stdin` es un archivo de `inputs/` o `-` (vacío); las líneas que empiezan con `#` son comentarios. Cada caso corre `busybox applet args…` con `targets/busybox/inputs/` como directorio actual y no escribe archivos: todo sale por stdout. La suite propia (`testsuite/runtest` de busybox) se corre con el binario bajo calco mediante un directorio de enlaces a un envoltorio `exec calco --argv0 "$0" busybox "$@"`; el subconjunto válido es el de las pruebas que pasan en nativo como usuario sin root ni red en dos corridas nativas seguidas; `busybox_suite.py` lo calcula en cada corrida y lo escribe en `build/busybox-suite/suite.list`, con los registros crudos `native.log` y `calco.log` al lado. Se compara el número de `PASS:` dentro del subconjunto.
 
 ## 7. Máquina de referencia
 
@@ -252,7 +252,7 @@ Busybox: `targets/busybox/cases.tsv` fija al menos 25 applets con entradas en `t
 - [diseño] Cargas fijas: (1) `sqlite3` con `targets/sqlite/bench.sql`; (2) `lua` con `targets/lua/bench/*.lua`; (3) TCC compilándose a sí mismo (`tcc_selfcompile` sin comparar); (4) `busybox gzip -9` de un archivo pseudoaleatorio fijo de 16 MiB (`targets/busybox/gen_bench_input.py`, semilla fija) y `busybox sha256sum` del resultado; (5) `sha512-sse` de QEMU.
 - [diseño] Metodología: cada carga y cada modo (nativo, qemu-x86_64, calco) fijado al núcleo 2 con `taskset -c 2`; 1 corrida de calentamiento descartada y 5 medidas; tiempo de pared por `time.perf_counter` y `ru_maxrss` por `os.wait4` (dato del kernel). Se toma la mediana por carga y la media geométrica de las razones de medianas. Antes de medir, cada carga se comprueba igual a nativo en los tres modos; si no, el script falla.
 - [diseño] Conclusión permitida, declarada antes de medir: calco frente a qemu-x86_64 es **equivalente** (mismo contrato: el mismo binario, salida idéntica, ejecución traducida en modo usuario), así que la razón es una diferencia real de velocidad. calco frente a nativo es **comparable**: es el costo de traducir, nunca un «más rápido».
-- [diseño] `results.json` registra `qemu_version` (salida de `qemu-x86_64-static --version`), `cpu_model` (de `/proc/cpuinfo`), `kernel` (`uname -r`), `core` (2), las medidas crudas y `maxrss_kb` por corrida; el script falla si falta alguno.
+- [diseño] `results.json` registra `qemu_version` (primera línea de `qemu-x86_64-static --version`), `cpu_model` (`model name` de `/proc/cpuinfo`), `kernel` (`uname -r`), `core` (2) y `workloads`: `{nombre: {"native": [...], "qemu": [...], "calco": [...]}}`, cada lista con las 5 corridas medidas como `{"seconds": float, "maxrss_kb": int}`; además `geomean_calco_qemu` y `geomean_calco_native`. El script falla si falta alguno.
 
 ## 9. Umbrales
 
@@ -337,7 +337,7 @@ Busybox: `targets/busybox/cases.tsv` fija al menos 25 applets con entradas en `t
 - Razón: es el oráculo de todas las comparaciones; ptrace no hace falta por D07.
 
 ### D18 — Suites de busybox y SQLite sin root
-- Decisión: busybox: el subconjunto de su `testsuite/runtest` que pasa en nativo sin root ni red en dos corridas, congelado en `targets/busybox/suite.list`. SQLite: no se usa su suite TCL; se usa una carga SQL fija.
+- Decisión: busybox: el subconjunto de su `testsuite/runtest` que pasa en nativo sin root ni red en dos corridas seguidas, recalculado en cada corrida y escrito en `build/busybox-suite/suite.list`. SQLite: no se usa su suite TCL; se usa una carga SQL fija.
 - Razón: el subconjunto se mide en lugar de adivinarse; los criterios de SQLite piden salida y hash de la base, no la suite, y la suite TCL exige construir `testfixture` y tclsh.
 
 ### D19 — Versiones de busybox, SQLite, Lua y TCC
