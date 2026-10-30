@@ -12,6 +12,12 @@
 //! the lock, by the dispatcher and by the signal handler. A thread only uses what it read
 //! there while `thread::enter_cache` marks it in the cache; emptying the cache waits for
 //! every other thread to be out of it (`thread::safe_point`).
+//!
+//! Invalidation (contract 3.7, 3.13) works on pages: `smc.rs` knows the blocks of each
+//! guest page and which pages are write-protected. An invalidated block is dead: its
+//! incoming and outgoing chains point back at their stubs and its rip leaves the table
+//! (a tombstone), but its code and pc table stay until the next flush, so a thread still
+//! inside it ends it and the signal handler can still read its state.
 
 pub mod trampoline;
 pub mod translate;
@@ -25,8 +31,9 @@ use std::sync::Arc;
 use crate::cpu::{Cpu, OFF_EXIT_REASON, RAX, RDI};
 use crate::cpuid;
 use crate::emit::{self, Asm};
-use crate::mem::{CODE_CACHE_SIZE, Mem};
+use crate::mem::{CODE_CACHE_SIZE, Mem, PAGE_SIZE};
 use crate::signal;
+use crate::smc::{Invalidation, Smc};
 use crate::sys::{self, EINVAL, PROT_EXEC, PROT_READ, PROT_WRITE};
 use crate::syscall;
 use crate::thread::{self, Member};
@@ -45,6 +52,8 @@ const MAP_SLOTS: usize = 1 << 20;
 /// Most blocks of a generation. The block list is allocated once with this capacity and
 /// never reallocates.
 const MAX_BLOCKS: usize = MAP_SLOTS / 2;
+/// Block id of a bucket whose block was invalidated; its rip stays to keep probe chains.
+const TOMBSTONE: u32 = u32::MAX;
 
 /// A translated block in the cache. Never changed once published.
 pub struct Block {
@@ -79,7 +88,9 @@ struct Bucket {
 /// Open-addressing hash table `guest rip → block index`, of fixed size, read without the
 /// cache lock. Rip 0 marks a free bucket: page 0 is never guest code (`mmap_min_addr`). The
 /// writer (with the lock) stores the block before the rip, the rip with release; a reader
-/// that sees the rip with acquire sees the block. Entries only go all at once, in `clear`.
+/// that sees the rip with acquire sees the block. An invalidated entry keeps its rip with
+/// the block `TOMBSTONE`; a new translation of that rip reuses the bucket. Buckets only
+/// become free all at once, in `clear`.
 pub struct BlockMap {
     buckets: Box<[Bucket]>,
     len: AtomicUsize,
@@ -117,7 +128,10 @@ impl BlockMap {
             let b = &self.buckets[i];
             match b.rip.load(Ordering::Acquire) {
                 0 => return None,
-                r if r == rip => return Some(b.block.load(Ordering::Relaxed)),
+                r if r == rip => {
+                    let block = b.block.load(Ordering::Acquire);
+                    return (block != TOMBSTONE).then_some(block);
+                }
                 _ => i = (i + 1) & (MAP_SLOTS - 1),
             }
         }
@@ -137,6 +151,22 @@ impl BlockMap {
                 }
                 r if r == rip => {
                     b.block.store(block, Ordering::Release);
+                    return;
+                }
+                _ => i = (i + 1) & (MAP_SLOTS - 1),
+            }
+        }
+    }
+
+    /// Takes `rip` out of the table, leaving a tombstone. Only with the cache lock held.
+    pub fn remove(&self, rip: u64) {
+        let mut i = self.slot(rip);
+        loop {
+            let b = &self.buckets[i];
+            match b.rip.load(Ordering::Relaxed) {
+                0 => return,
+                r if r == rip => {
+                    b.block.store(TOMBSTONE, Ordering::Release);
                     return;
                 }
                 _ => i = (i + 1) & (MAP_SLOTS - 1),
@@ -244,6 +274,11 @@ pub struct Jit {
     /// Ids of the exits of any block that are chained to each block, by block id.
     incoming: Vec<Vec<u32>>,
     exits: Vec<Exit>,
+    /// Invalidated blocks and one-instruction blocks, by block id: never linked, never in
+    /// the lookup table.
+    dead: Vec<bool>,
+    /// Pages with translations (contract 3.13).
+    smc: Smc,
     /// Counts flushes; an exit id is only valid in the generation that made it.
     generation: u64,
     index: &'static Index,
@@ -294,6 +329,8 @@ impl Jit {
             blocks,
             incoming: Vec::new(),
             exits: Vec::new(),
+            dead: Vec::new(),
+            smc: Smc::new(),
             generation: 0,
             index,
         })
@@ -316,29 +353,51 @@ impl Jit {
     }
 
     /// Translates the block at `rip` and installs it, emptying the cache first if it does
-    /// not fit in the arena or in the block list.
+    /// not fit in the arena or in the block list. The pages it was read from are noted and,
+    /// if the guest may write them, write-protected in the host (contract 3.13).
     pub fn translate(&mut self, rip: u64, mem: &Mem) -> Result<u32, Fault> {
-        let mut t = self.translate_at_top(rip, mem)?;
-        if self.top + t.code.len() as u64 > self.end || self.blocks.len() >= MAX_BLOCKS {
-            self.flush();
-            t = self.translate_at_top(rip, mem)?;
+        let t = self.translate_fitting(rip, mem, translate::MAX_INSNS)?;
+        let (start, end) = (t.rip, t.guest_end);
+        let id = self.install(t, true);
+        let prot_of = |page| mem.intervals.find(page).map_or(0, |r| r.prot);
+        for (page, prot) in self.smc.track(id, start, end, prot_of) {
+            // A guest page with translations; `mem` keeps it mapped while the lock is held.
+            let _ = unsafe { sys::mprotect(page, PAGE_SIZE, prot) };
         }
-        Ok(self.install(t))
+        Ok(id)
     }
 
-    fn translate_at_top(&self, rip: u64, mem: &Mem) -> Result<Translation, Fault> {
+    /// Translates only the instruction at `rip`, as a dead block that is neither in the
+    /// table nor noted in its page: after a write fault invalidated the block that made
+    /// it, the write runs here, with the page writable, and the code after it is
+    /// translated again from what it wrote.
+    pub fn translate_step(&mut self, rip: u64, mem: &Mem) -> Result<u32, Fault> {
+        let t = self.translate_fitting(rip, mem, 1)?;
+        Ok(self.install(t, false))
+    }
+
+    fn translate_fitting(&mut self, rip: u64, mem: &Mem, max: usize) -> Result<Translation, Fault> {
+        let mut t = self.translate_at_top(rip, mem, max)?;
+        if self.top + t.code.len() as u64 > self.end || self.blocks.len() >= MAX_BLOCKS {
+            self.flush();
+            t = self.translate_at_top(rip, mem, max)?;
+        }
+        Ok(t)
+    }
+
+    fn translate_at_top(&self, rip: u64, mem: &Mem, max: usize) -> Result<Translation, Fault> {
         let env = Env {
             host: self.top,
             exit_thunk: self.exit_thunk,
             indirect_exit: self.indirect_exit,
             first_exit_id: self.exits.len() as u32,
         };
-        translate::translate(mem, rip, &env)
+        translate::translate_max(mem, rip, &env, max)
     }
 
-    /// Writes the code, then publishes the block, then its rip in the table: a thread that
-    /// finds the rip finds the block and its code complete.
-    fn install(&mut self, t: Translation) -> u32 {
+    /// Writes the code, then publishes the block, then (if `live`) its rip in the table: a
+    /// thread that finds the rip finds the block and its code complete.
+    fn install(&mut self, t: Translation, live: bool) -> u32 {
         let host = self.top;
         // The arena is calco's RWX memory and [host, host + len) is free.
         unsafe { core::ptr::copy_nonoverlapping(t.code.as_ptr(), host as *mut u8, t.code.len()) };
@@ -365,9 +424,66 @@ impl Jit {
             exits: first..self.exits.len() as u32,
         });
         self.incoming.push(Vec::new());
+        self.dead.push(!live);
         self.index.publish(&mut self.blocks);
-        self.index.map.insert(t.rip, id);
+        if live {
+            self.index.map.insert(t.rip, id);
+        }
         id
+    }
+
+    /// Whether block `id` was invalidated or is a one-instruction block.
+    pub fn is_dead(&self, id: u32) -> bool {
+        self.dead[id as usize]
+    }
+
+    /// A guest write to `addr` faulted. If calco write-protected that page, its blocks
+    /// are invalidated and the page gets its write back; returns the invalidated blocks.
+    /// `None` means the fault is the guest's own.
+    pub fn write_fault(&mut self, addr: u64) -> Option<Vec<u32>> {
+        let inv = self.smc.write_fault(addr)?;
+        Some(self.apply(inv))
+    }
+
+    /// Invalidates the translations of guest code in `range` (contract 3.7) and gives
+    /// write-protected pages there their host protection back.
+    pub fn invalidate_range(&mut self, range: core::ops::Range<u64>) {
+        let inv = self.smc.invalidate(range);
+        if !inv.is_empty() {
+            self.apply(inv);
+        }
+    }
+
+    /// After the guest set `range` to `prot`, which keeps execute: pages with translations
+    /// that the guest may write lose write in the host again.
+    pub fn reprotect(&mut self, range: core::ops::Range<u64>, prot: u32) {
+        for (page, host) in self.smc.reprotect(range, prot) {
+            // A guest page with translations, mapped: the guest just changed it.
+            let _ = unsafe { sys::mprotect(page, PAGE_SIZE, host) };
+        }
+    }
+
+    /// Kills the blocks of `inv` and gives its pages their protection back.
+    fn apply(&mut self, inv: Invalidation) -> Vec<u32> {
+        for &id in &inv.blocks {
+            self.kill(id);
+        }
+        for &(page, prot) in &inv.restore {
+            // The page may be gone already (`munmap` after the fact); then it fails.
+            let _ = unsafe { sys::mprotect(page, PAGE_SIZE, prot) };
+        }
+        inv.blocks
+    }
+
+    /// Unlinks block `id` both ways and takes its rip out of the table. Its code stays: a
+    /// thread inside it ends it and then leaves to the dispatcher (contract 3.13).
+    fn kill(&mut self, id: u32) {
+        if std::mem::replace(&mut self.dead[id as usize], true) {
+            return;
+        }
+        self.index.map.remove(self.blocks[id as usize].rip);
+        self.unlink_incoming(id);
+        self.unlink_outgoing(id);
     }
 
     /// Empties the whole cache (contract 3.7) once no other thread is in it
@@ -375,9 +491,14 @@ impl Jit {
     pub fn flush(&mut self) {
         let index = self.index;
         thread::safe_point(|| {
+            for (page, prot) in self.smc.clear() {
+                // Guest pages with translations: their logical protection comes back.
+                let _ = unsafe { sys::mprotect(page, PAGE_SIZE, prot) };
+            }
             self.blocks.clear();
             self.incoming.clear();
             self.exits.clear();
+            self.dead.clear();
             index.map.clear();
             index.publish(&mut self.blocks);
             self.top = self.start;
@@ -390,7 +511,8 @@ impl Jit {
     pub fn link(&mut self, exit: u32, block: u32) {
         let e = &mut self.exits[exit as usize];
         let b = &self.blocks[block as usize];
-        if e.linked || e.target != b.rip {
+        if e.linked || e.target != b.rip || self.dead[e.block as usize] || self.dead[block as usize]
+        {
             return;
         }
         patch_rel32(e.jump, b.host);
@@ -439,15 +561,20 @@ pub fn run(cpu: &mut Cpu, me: &Arc<Member>) -> u64 {
     // Exit to chain to the next block, with the generation it belongs to.
     let mut chain: Option<(u32, u64)> = None;
     loop {
+        if cpu.smc_write != 0 {
+            deferred_write(cpu);
+        }
         if signal::wants_delivery(cpu) {
             let mut world = thread::shared().world();
             let world = &mut *world;
             world.state.signals.deliver(cpu, &world.mem);
         }
         thread::enter_cache(me);
+        // Resuming at a write that invalidated its own block: that instruction runs alone.
+        let step = core::mem::take(&mut cpu.smc_step) == cpu.rip;
         let host = match index.lookup(cpu.rip) {
-            Some((_, host)) if chain.is_none() => host,
-            _ => match locked_block(cpu, me, chain.take()) {
+            Some((_, host)) if chain.is_none() && !step => host,
+            _ => match locked_block(cpu, me, chain.take(), step) {
                 Some(host) => host,
                 None => continue,
             },
@@ -475,20 +602,27 @@ pub fn run(cpu: &mut Cpu, me: &Arc<Member>) -> u64 {
 
 /// The host code of the block at `cpu.rip`, under the cache lock: translated if no thread
 /// did it meanwhile, and with the exit `chain` linked to it if it is of this generation.
-/// `None` if the code cannot be fetched; the guest then gets the fault. The thread is in
-/// the cache when this returns `Some`.
-fn locked_block(cpu: &mut Cpu, me: &Member, chain: Option<(u32, u64)>) -> Option<u64> {
+/// With `step`, a one-instruction block made for this run only (contract 3.13). `None` if
+/// the code cannot be fetched; the guest then gets the fault. The thread is in the cache
+/// when this returns `Some`.
+fn locked_block(cpu: &mut Cpu, me: &Member, chain: Option<(u32, u64)>, step: bool) -> Option<u64> {
     let shared = thread::shared();
     // A thread waiting for the lock is out of the cache, so a flush does not wait for it.
     thread::leave_cache(me);
     let mut jit = shared.jit();
     // No flush runs while this thread holds the lock: entering does not park.
     thread::enter_cache(me);
-    let block = match jit.lookup(cpu.rip) {
+    let found = if step { None } else { jit.lookup(cpu.rip) };
+    let block = match found {
         Some(block) => block,
         None => {
             let world = shared.world();
-            match jit.translate(cpu.rip, &world.mem) {
+            let made = if step {
+                jit.translate_step(cpu.rip, &world.mem)
+            } else {
+                jit.translate(cpu.rip, &world.mem)
+            };
+            match made {
                 Ok(block) => block,
                 Err(f) => {
                     signal::exec_fault(cpu, &world.mem, f.signal as u32, f.addr);
@@ -504,6 +638,33 @@ fn locked_block(cpu: &mut Cpu, me: &Member, chain: Option<(u32, u64)>) -> Option
         jit.link(exit, block);
     }
     Some(jit.block(block).host)
+}
+
+/// A guest write to `cpu.smc_write` faulted and the signal handler could not settle it
+/// (cache lock busy, or the page not protected by calco when it looked); it left the
+/// thread at the boundary of the writing instruction with the fault noted. With the locks,
+/// the dispatcher decides: a write to code calco protects invalidates the page and the
+/// instruction runs again alone; a write the guest may do (another thread gave the page
+/// its write back meanwhile) just runs again. Either way the noted fault is dropped;
+/// otherwise it is the guest's and goes to it.
+fn deferred_write(cpu: &mut Cpu) {
+    let addr = core::mem::take(&mut cpu.smc_write);
+    let shared = thread::shared();
+    let mut jit = shared.jit();
+    let ours = jit.write_fault(addr).is_some();
+    let allowed = ours
+        || shared
+            .world()
+            .mem
+            .intervals
+            .find(addr)
+            .is_some_and(|r| r.prot & PROT_WRITE != 0);
+    if allowed {
+        signal::drop_fault(cpu);
+    }
+    if ours {
+        cpu.smc_step = cpu.rip;
+    }
 }
 
 #[cfg(test)]

@@ -442,6 +442,12 @@ pub fn trap(cpu: &mut Cpu, sig: u32) {
     });
 }
 
+/// Drops the fault noted for the thread of `cpu`: it was a write to code that calco had
+/// write-protected, not the guest's (contract 3.13).
+pub fn drop_fault(cpu: &mut Cpu) {
+    thread(cpu).take_fault();
+}
+
 /// The block at `cpu.rip` cannot be fetched: SIGSEGV on `addr`, the first byte without
 /// execute permission, as an instruction fetch page fault gives it.
 pub fn exec_fault(cpu: &mut Cpu, mem: &Mem, sig: u32, addr: u64) {

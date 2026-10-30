@@ -11,6 +11,12 @@
 //!   block: the pc table gives the guest rip and the temporaries in scratch; since every
 //!   recoded instruction faults before having any effect, that is the exact guest state.
 //!   It goes to `Cpu` with the signal, and the thread resumes in the dispatcher.
+//!   A write fault on a guest page calco write-protected because it holds translations
+//!   (contract 3.13) is not the guest's: with the cache lock free, the handler invalidates
+//!   the page's blocks and gives the write back; the write runs again in place, or, if its
+//!   own block went, from the dispatcher at the rebuilt boundary, alone in a block. With
+//!   the lock busy, the thread goes to the dispatcher with the fault noted and the address
+//!   in `Cpu.smc_write`, and the dispatcher decides with the lock.
 //! - A fault anywhere else is a calco bug: the process dies by that signal.
 //! - An asynchronous signal is queued and blocked in the host until `deliver` takes it. If
 //!   the guest blocks it, nothing else happens. Otherwise: in the safe system call before
@@ -33,9 +39,10 @@ use super::frame::{
 };
 use super::{
     AC, DF, ERESTART_INTERNAL, GUEST_SIGNALS, HOST_KICK, Process, SA_NOCLDSTOP, SA_NOCLDWAIT,
-    SA_ONSTACK, SA_RESTORER, SA_SIGINFO, SIG_DFL, SIG_IGN, SIGBUS, SIGFPE, SIGILL, SIGPIPE,
-    SIGSEGV, SIGTRAP, SYNC_SIGNALS, SigAction, SigInfo, SyncSignal, TF, Thread, at_boundary, bit,
-    entry_at, guest_set, guest_signal, host_mask, host_signal, reconstruct, thread,
+    SA_ONSTACK, SA_RESTORER, SA_SIGINFO, SEGV_ACCERR, SIG_DFL, SIG_IGN, SIGBUS, SIGFPE, SIGILL,
+    SIGPIPE, SIGSEGV, SIGTRAP, SYNC_SIGNALS, SigAction, SigInfo, SyncSignal, TF, Thread,
+    at_boundary, bit, entry_at, guest_set, guest_signal, host_mask, host_signal, reconstruct,
+    thread,
 };
 use crate::cpu::{Cpu, OFF_HOST_FS, OFF_PENDING_SIGNALS, RAX, RSP};
 use crate::jit::translate::EXIT_INTERRUPTED;
@@ -48,6 +55,8 @@ static PROBE: AtomicU32 = AtomicU32::new(PROBE_IDLE);
 const PROBE_IDLE: u32 = 0;
 const PROBE_ARMED: u32 = 1;
 const PROBE_STEPPING: u32 = 2;
+/// Bit of the page fault error code set by a write access.
+const PF_WRITE: u64 = 2;
 /// Size of calco's alternate stack of each thread.
 const HOST_STACK_SIZE: u64 = 64 << 10;
 
@@ -285,6 +294,11 @@ unsafe extern "sysv64" fn on_signal(sig: i32, info: *const u8, uc: *mut u8, fs: 
             return kick(cpu, th, uc, pc, fs);
         }
         if sync_fault(sig, info) {
+            if sig == SIGSEGV
+                && let Some(fs) = code_write(cpu, th, info, uc, pc, fs)
+            {
+                return fs;
+            }
             return fault(cpu, th, sig, info, uc, pc);
         }
         async_signal(cpu, th, sig, info, uc, pc, fs)
@@ -339,6 +353,41 @@ unsafe fn fault(
         cr2: unsafe { get(uc, UC_CR2) },
     });
     unsafe { redirect(cpu, th, uc, &gpr, rip) }
+}
+
+/// A SIGSEGV in a block that may be a guest write to code calco write-protected
+/// (contract 3.13). Returns the FS base to go back with if it was, `None` if it is not a
+/// write fault or if the dispatcher has to decide: the cache lock is busy, or the page is
+/// not one calco protects (another thread may have just invalidated it). Then
+/// `Cpu.smc_write` holds the address and `fault` notes the fault as usual.
+unsafe fn code_write(
+    cpu: *mut Cpu,
+    th: &Thread,
+    info: *const u8,
+    uc: *mut u8,
+    pc: u64,
+    fs: u64,
+) -> Option<u64> {
+    let code = unsafe { (info.add(frame::SI_CODE) as *const i32).read_unaligned() };
+    if code != SEGV_ACCERR || unsafe { get(uc, UC_ERR) } & PF_WRITE == 0 {
+        return None;
+    }
+    let (id, block, off) = unsafe { locate(pc) }?;
+    let addr = unsafe { (info.add(frame::SI_ADDR) as *const u64).read_unaligned() };
+    let Some(gone) = crate::thread::try_jit().and_then(|mut jit| jit.write_fault(addr)) else {
+        unsafe { (*cpu).smc_write = addr };
+        return None;
+    };
+    if !gone.contains(&id) {
+        // The page is writable again and the block still valid: the write runs again.
+        return Some(fs);
+    }
+    // Every recoded instruction faults before having effects: the boundary is exact.
+    let (gpr, rip) = unsafe { guest_state(cpu, uc, block, off) };
+    unsafe {
+        (*cpu).smc_step = rip;
+        Some(redirect(cpu, th, uc, &gpr, rip))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

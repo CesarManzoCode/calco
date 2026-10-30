@@ -49,6 +49,9 @@ Fuente única de lo que calco no demuestra o no hace. Ningún otro archivo los r
 - Mientras calco avanza con TF hasta la siguiente frontera, una instrucción `pushfq` del invitado guarda TF encendida, y un `popfq` que la apaga detiene el avance: la señal se entrega cuando el bloque sale al despachador.
 - Del `siginfo_t` de una señal del anfitrión solo se traducen `si_signo` y el `si_status` de SIGCHLD; cualquier otro campo que lleve un número de señal (por ejemplo un `si_value` armado por el emisor) llega como lo da el kernel.
 - Un hilo que está ejecutando un bloque cuando otro hilo modifica ese código lo termina con la versión vieja.
+- Una página del invitado con traducciones y permiso de escritura queda sin escritura en el anfitrión: si el kernel escribe ahí por una llamada del invitado (por ejemplo `read` a un búfer en esa página), la llamada devuelve `EFAULT`; si calco mismo escribe ahí al emular una llamada, el proceso muere por SIGSEGV.
+- Cualquier escritura en una página con traducciones, aunque sea a datos y no a código, invalida todos los bloques de la página; el espacio de los bloques invalidados en la caché no se recupera hasta el siguiente vaciado completo.
+- `brk` que encoge sobre páginas que el invitado hizo ejecutables no invalida sus traducciones.
 - Llamadas al sistema fuera de la lista del contrato devuelven `ENOSYS`.
 - `mremap` con `MREMAP_DONTUNMAP` devuelve `EINVAL`, y solo acepta rangos dentro de un único intervalo del invitado.
 - `mmap` ignora `MAP_32BIT`: la colocación sin dirección fija siempre usa la ventana del invitado.

@@ -50,6 +50,12 @@ pub struct Cpu {
     pub signal_state: *mut c_void,
     pub tid: u64,
     pub clear_child_tid: u64,
+    /// Guest address of a write to code that faulted while the cache lock was busy; the
+    /// dispatcher serves it (contract 3.13). 0 if none.
+    pub smc_write: u64,
+    /// Rip of a guest write whose fault invalidated its own block: the dispatcher runs
+    /// that one instruction in a block of its own. 0 if none.
+    pub smc_step: u64,
 }
 
 pub const OFF_GPR: usize = offset_of!(Cpu, gpr);
@@ -106,6 +112,8 @@ impl Cpu {
             signal_state: core::ptr::null_mut(),
             tid: 0,
             clear_child_tid: 0,
+            smc_write: 0,
+            smc_step: 0,
         })
     }
 }

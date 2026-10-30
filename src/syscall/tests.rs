@@ -42,13 +42,25 @@ fn mmap_drops_prot_exec_and_keeps_logical_prot() {
         0
     );
     assert_eq!(host_perms(addr), "rw-p");
-    assert!(!st.take_code_changed(), "adding write keeps translations");
+    let args = [addr, len, rwx, 0, 0, 0];
+    assert!(
+        invalidated(MPROTECT, args).is_empty(),
+        "adding write keeps translations"
+    );
+    assert_eq!(
+        reprotected(MPROTECT, args),
+        Some((addr..addr + len, rwx as u32))
+    );
 
     assert_eq!(
         st.dispatch(&mut cpu, &mut mem, MUNMAP, [addr, len, 0, 0, 0, 0]),
         0
     );
-    assert!(st.take_code_changed(), "unmapping code stales the cache");
+    assert_eq!(
+        invalidated(MUNMAP, [addr, len, 0, 0, 0, 0]),
+        vec![addr..addr + len],
+        "unmapping code drops its translations"
+    );
     assert_eq!(mem.intervals.find(addr), None);
 }
 
@@ -258,4 +270,43 @@ fn execve_that_the_kernel_refuses_returns_its_errno() {
         st.dispatch(&mut cpu, &mut mem, EXECVE, bad),
         -(EFAULT as i64)
     );
+}
+
+#[test]
+fn memory_calls_name_the_ranges_they_invalidate() {
+    let page = 0x0000_2d00_0000_0000u64;
+    let rw = (PROT_READ | PROT_WRITE) as u64;
+    let rx = (PROT_READ | PROT_EXEC) as u64;
+    // Lengths round up to whole pages, as the kernel does.
+    assert_eq!(
+        invalidated(MPROTECT, [page, 1, rw, 0, 0, 0]),
+        vec![page..page + PAGE_SIZE]
+    );
+    assert!(invalidated(MPROTECT, [page, 1, rx, 0, 0, 0]).is_empty());
+    assert_eq!(
+        reprotected(MPROTECT, [page, 1, rx, 0, 0, 0]),
+        Some((page..page + PAGE_SIZE, rx as u32))
+    );
+    assert_eq!(reprotected(MPROTECT, [page, 1, rw, 0, 0, 0]), None);
+    assert_eq!(
+        invalidated(MADVISE, [page, 2 * PAGE_SIZE, MADV_DONTNEED, 0, 0, 0]),
+        vec![page..page + 2 * PAGE_SIZE]
+    );
+    // MADV_WILLNEED (3) keeps the contents.
+    assert!(invalidated(MADVISE, [page, PAGE_SIZE, 3, 0, 0, 0]).is_empty());
+    let fixed = (MAP_PRIVATE | MAP_ANONYMOUS | sys::MAP_FIXED) as u64;
+    assert_eq!(
+        invalidated(MMAP, [page, PAGE_SIZE, rx, fixed, u64::MAX, 0]),
+        vec![page..page + PAGE_SIZE]
+    );
+    let placed = (MAP_PRIVATE | MAP_ANONYMOUS) as u64;
+    assert!(invalidated(MMAP, [0, PAGE_SIZE, rx, placed, u64::MAX, 0]).is_empty());
+    let target = page + 0x10_0000;
+    let moved = (sys::MREMAP_MAYMOVE | sys::MREMAP_FIXED) as u64;
+    assert_eq!(
+        invalidated(MREMAP, [page, PAGE_SIZE, 2 * PAGE_SIZE, moved, target, 0]),
+        vec![page..page + PAGE_SIZE, target..target + 2 * PAGE_SIZE]
+    );
+    assert!(invalidated(MUNMAP, [page, 0, 0, 0, 0, 0]).is_empty());
+    assert!(invalidated(BRK, [page, 0, 0, 0, 0, 0]).is_empty());
 }

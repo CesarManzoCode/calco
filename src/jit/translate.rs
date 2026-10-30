@@ -123,6 +123,17 @@ pub struct Fault {
 
 /// Translates the block that starts at `rip`.
 pub fn translate(code: &dyn GuestCode, rip: u64, env: &Env) -> Result<Translation, Fault> {
+    translate_max(code, rip, env, MAX_INSNS)
+}
+
+/// Translates the block that starts at `rip` with at most `max` guest instructions
+/// (1 for the step after a write to code, contract 3.13).
+pub fn translate_max(
+    code: &dyn GuestCode,
+    rip: u64,
+    env: &Env,
+    max: usize,
+) -> Result<Translation, Fault> {
     let mut tr = Tr {
         env,
         asm: Asm::new(env.host),
@@ -135,7 +146,7 @@ pub fn translate(code: &dyn GuestCode, rip: u64, env: &Env) -> Result<Translatio
     let mut insns = 0;
     let mut guest_end = rip;
     loop {
-        if insns == MAX_INSNS || (pc & !(PAGE_SIZE - 1)) != page {
+        if insns == max.min(MAX_INSNS) || (pc & !(PAGE_SIZE - 1)) != page {
             tr.mark(GuestPc::At(pc));
             tr.chain_jmp(pc);
             break;

@@ -11,6 +11,7 @@ mod jit;
 mod loader;
 mod mem;
 mod signal;
+mod smc;
 mod sys;
 mod syscall;
 mod thread;

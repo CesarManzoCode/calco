@@ -34,6 +34,7 @@ use crate::cpu::{Cpu, R8, R9, R10, R11, RAX, RCX, RDI, RDX, RSI, RSP};
 use crate::loader;
 use crate::mem::{Mem, USER_END, host_prot};
 use crate::signal::{self, TimedWait, guest_signal, host_signal};
+use crate::smc;
 use crate::sys::{
     self, AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, E2BIG, EFAULT, EINVAL, ELOOP, ENAMETOOLONG,
     ENOSYS, EPERM, MAP_ANONYMOUS, PROT_EXEC, PROT_READ, PROT_WRITE,
@@ -84,8 +85,6 @@ pub struct State {
     pub signals: signal::Process,
     /// The last `set_robust_list` of any thread.
     pub robust_list: (u64, u64),
-    /// Set when guest code may have been unmapped, replaced or lost execute permission.
-    code_changed: bool,
 }
 
 fn err(errno: i32) -> i64 {
@@ -253,14 +252,7 @@ impl State {
             log,
             signals: signal::Process::new(),
             robust_list: (0, 0),
-            code_changed: false,
         }
-    }
-
-    /// Whether guest code changed since the last call; the dispatcher then empties the
-    /// code cache.
-    pub fn take_code_changed(&mut self) -> bool {
-        std::mem::take(&mut self.code_changed)
     }
 
     /// Serves call `nr` with arguments `a` and returns what the guest gets in RAX.
@@ -276,19 +268,12 @@ impl State {
         match nr {
             BRK => mem.brk(a[0]) as i64,
             MMAP => self.mmap(mem, a),
-            MUNMAP => {
-                self.note_code_change(mem, a[0], a[1]);
-                result(mem.unmap(a[0], a[1]).map(|()| 0))
-            }
+            MUNMAP => result(mem.unmap(a[0], a[1]).map(|()| 0)),
             MPROTECT => {
-                if a[2] & PROT_EXEC as u64 == 0 {
-                    self.note_code_change(mem, a[0], a[1]);
-                }
                 let prot = u32::try_from(a[2]).map_err(|_| EINVAL);
                 result(prot.and_then(|p| mem.protect(a[0], a[1], p)).map(|()| 0))
             }
             MREMAP => {
-                self.note_code_change(mem, a[0], a[1]);
                 let flags = u32::try_from(a[3]).map_err(|_| EINVAL);
                 result(flags.and_then(|f| mem.remap(a[0], a[1], a[2], f, a[4])))
             }
@@ -355,14 +340,8 @@ impl State {
                 let ret = pass(nr, a);
                 wait_result(mem, nr, a, ret)
             }
-            MADVISE => {
-                let ret = pass(nr, a);
-                // Dropped pages read back as zeros or the file: translations of them go.
-                if ret == 0 && a[2] == MADV_DONTNEED {
-                    self.note_code_change(mem, a[0], a[1]);
-                }
-                ret
-            }
+            // Translations of pages dropped by MADV_DONTNEED went before (`invalidated`).
+            MADVISE => pass(nr, a),
             PRCTL => match a[0] {
                 PR_SET_PDEATHSIG | PR_SET_NAME | PR_GET_NAME => pass(nr, a),
                 _ => err(EINVAL),
@@ -376,30 +355,12 @@ impl State {
         let (Ok(prot), Ok(flags)) = (u32::try_from(prot), u32::try_from(flags)) else {
             return err(EINVAL);
         };
-        // A fixed mapping may replace guest code.
-        if flags & sys::MAP_FIXED != 0 {
-            self.note_code_change(mem, addr, len);
-        }
         let r = if flags & MAP_ANONYMOUS != 0 {
             mem.map_anon(addr, len, prot, flags)
         } else {
             mem.map_file(addr, len, prot, flags, fd as i32, offset)
         };
         result(r)
-    }
-
-    /// Marks the code cache stale if `[addr, addr + len)` touches guest code.
-    fn note_code_change(&mut self, mem: &Mem, addr: u64, len: u64) {
-        let end = addr.saturating_add(len).min(USER_END);
-        if addr < end
-            && mem
-                .intervals
-                .overlapping(addr, end)
-                .iter()
-                .any(|r| r.prot & PROT_EXEC != 0)
-        {
-            self.code_changed = true;
-        }
     }
 
     /// `execve` of `path`: if the kernel would run it, calco runs itself again on it with
@@ -603,31 +564,66 @@ pub fn handle(cpu: &mut Cpu, me: &Arc<Member>) {
     cpu.gpr[R11] = cpu.rflags;
 }
 
+/// The guest ranges whose translations go before memory call `nr` runs (contract 3.7,
+/// 3.10): what `munmap`, `mremap` (its old range, and the target of `MREMAP_FIXED`), a
+/// fixed `mmap`, `mprotect` without execute and `madvise(MADV_DONTNEED)` touch. Going
+/// first, write-protected pages get their host protection back before they move or change.
+pub fn invalidated(nr: u64, a: [u64; 6]) -> Vec<core::ops::Range<u64>> {
+    let drops = match nr {
+        MUNMAP | MREMAP => true,
+        MMAP => a[3] & sys::MAP_FIXED as u64 != 0,
+        MPROTECT => a[2] & PROT_EXEC as u64 == 0,
+        MADVISE => a[2] == MADV_DONTNEED,
+        _ => false,
+    };
+    let mut out = Vec::new();
+    if drops {
+        out.extend(smc::span(a[0], a[1]));
+    }
+    if nr == MREMAP && a[3] & sys::MREMAP_FIXED as u64 != 0 {
+        out.extend(smc::span(a[4], a[2]));
+    }
+    out
+}
+
+/// The range of an `mprotect` that keeps execute, whose pages with translations the
+/// guest may now write: they lose write in the host again after the call.
+pub fn reprotected(nr: u64, a: [u64; 6]) -> Option<(core::ops::Range<u64>, u32)> {
+    if nr != MPROTECT || a[2] & PROT_EXEC as u64 == 0 {
+        return None;
+    }
+    Some((smc::span(a[0], a[1])?, u32::try_from(a[2]).ok()?))
+}
+
 /// An emulated call served with the process lock held. A call that may change guest code
-/// takes the cache lock first and empties the cache before letting it go, so no thread
-/// runs a translation of code that is gone; `fork` takes the cache lock and the thread list
-/// too, so the child finds every lock of calco free.
+/// takes the cache lock first and invalidates the translations of the range it touches
+/// before it runs, so no thread enters a translation of code that is gone; `fork` takes
+/// the cache lock and the thread list too, so the child finds every lock of calco free.
 fn locked(cpu: &mut Cpu, me: &Arc<Member>, nr: u64, a: [u64; 6]) -> i64 {
     let shared = thread::shared();
     let forks = matches!(nr, FORK | VFORK)
         || (nr == CLONE && thread::clone_kind(a[0]) == Ok(CloneKind::Fork));
-    let changes_code = matches!(nr, MUNMAP | MPROTECT | MREMAP | MADVISE)
-        || (nr == MMAP && a[3] & sys::MAP_FIXED as u64 != 0);
-    let jit = (forks || changes_code).then(|| shared.jit());
+    let drops = invalidated(nr, a);
+    let keeps = reprotected(nr, a);
+    let mut jit = (forks || !drops.is_empty() || keeps.is_some()).then(|| shared.jit());
+    if let Some(jit) = jit.as_mut() {
+        for range in drops {
+            jit.invalidate_range(range);
+        }
+    }
     let mut world = shared.world();
     let mut threads = forks.then(|| shared.threads());
     let w = &mut *world;
     let ret = w.state.dispatch(cpu, &mut w.mem, nr, a);
-    let changed = w.state.take_code_changed();
     if ret == 0
         && let Some(threads) = threads.as_mut()
     {
         thread::forked(threads, me);
     }
-    drop(threads);
-    drop(world);
-    if changed {
-        jit.unwrap_or_else(|| shared.jit()).flush();
+    if ret == 0
+        && let (Some(jit), Some((range, prot))) = (jit.as_mut(), keeps)
+    {
+        jit.reprotect(range, prot);
     }
     ret
 }
