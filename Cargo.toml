@@ -1,0 +1,12 @@
+[package]
+name = "calco"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Dynamic binary translator from x86-64 to x86-64 for Linux user-mode programs"
+
+[dependencies]
+
+[profile.release]
+panic = "abort"
+debug = 1
