@@ -19,7 +19,9 @@ fn offsets_are_stable() {
     assert_eq!(OFF_SIGNAL_STATE, 744);
     assert_eq!(OFF_TID, 752);
     assert_eq!(OFF_CLEAR_CHILD_TID, 760);
-    assert_eq!(core::mem::size_of::<Cpu>(), 768);
+    assert_eq!(offset_of!(Cpu, smc_write), 768);
+    assert_eq!(offset_of!(Cpu, smc_step), 776);
+    assert_eq!(core::mem::size_of::<Cpu>(), 784);
 }
 
 #[test]

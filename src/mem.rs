@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use crate::sys::{
     self, EEXIST, EFAULT, EINVAL, ENOMEM, MAP_ANONYMOUS, MAP_FIXED, MAP_FIXED_NOREPLACE,
     MAP_NORESERVE, MAP_POPULATE, MAP_PRIVATE, MAP_STACK, MAP_TYPE, MREMAP_FIXED, MREMAP_MAYMOVE,
-    PROT_EXEC, PROT_NONE, PROT_READ, PROT_WRITE,
+    PROT_EXEC, PROT_NONE, PROT_READ, PROT_WRITE, SHM_EXEC, SHM_RDONLY, SHM_REMAP, SHM_RND,
 };
 
 pub const PAGE_SIZE: u64 = 4096;
@@ -188,6 +188,8 @@ pub struct Mem {
     brk_cur: u64,
     code_cache: u64,
     window_start: u64,
+    /// System V shared memory attached by the guest: address → length in pages, for `shmdt`.
+    shm: BTreeMap<u64, u64>,
 }
 
 impl Mem {
@@ -295,6 +297,7 @@ impl Mem {
                     release(&claimed);
                     return Err(e);
                 }
+                self.forget_shm(addr, end);
             }
             self.intervals.insert(addr, end, prot);
             return Ok(addr);
@@ -388,7 +391,91 @@ impl Mem {
             unsafe { sys::munmap(s, e - s) }?;
         }
         self.intervals.remove(addr, end);
+        self.forget_shm(addr, end);
         Ok(())
+    }
+
+    /// Emulated `shmat` (contract 3.10): the segment goes where the guest asks, never over
+    /// calco memory, or first fit in the placement window; the host never gets `SHM_EXEC`.
+    pub fn attach_shm(&mut self, id: i32, addr: u64, flags: u32) -> Result<u64, i32> {
+        let len = page_up(sys::shm_size(id)?);
+        if len == 0 || len > USER_END {
+            return Err(EINVAL);
+        }
+        let mut prot = if flags & SHM_RDONLY != 0 {
+            PROT_READ
+        } else {
+            PROT_READ | PROT_WRITE
+        };
+        if flags & SHM_EXEC != 0 {
+            prot |= PROT_EXEC;
+        }
+        let hflags = flags & SHM_RDONLY;
+        let at = if addr == 0 {
+            if flags & SHM_REMAP != 0 {
+                return Err(EINVAL);
+            }
+            // Reserves the place, then the segment replaces the reservation.
+            let reserve = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
+            let at = self.place(len, PROT_NONE, reserve, -1, 0)?;
+            if let Err(e) = unsafe { sys::shmat(id, at, hflags | SHM_REMAP) } {
+                release(&[(at, at + len)]);
+                return Err(e);
+            }
+            at
+        } else {
+            // SHMLBA is the page size on x86-64.
+            let at = if flags & SHM_RND != 0 && addr >= PAGE_SIZE {
+                page_down(addr)
+            } else {
+                addr
+            };
+            if at % PAGE_SIZE != 0 {
+                return Err(EINVAL);
+            }
+            let end = at
+                .checked_add(len)
+                .filter(|&e| e <= USER_END)
+                .ok_or(EINVAL)?;
+            if flags & SHM_REMAP != 0 {
+                // Guest-owned parts are replaced; the rest must be free in the host.
+                let claimed = self.claim(at, end)?;
+                if let Err(e) = unsafe { sys::shmat(id, at, hflags | SHM_REMAP) } {
+                    release(&claimed);
+                    return Err(e);
+                }
+                self.forget_shm(at, end);
+            } else {
+                // Like the kernel without SHM_REMAP: the range must be free.
+                if self.intervals.overlaps(at, end) {
+                    return Err(EINVAL);
+                }
+                unsafe { sys::shmat(id, at, hflags) }?;
+            }
+            at
+        };
+        self.intervals.insert(at, at + len, prot);
+        self.shm.insert(at, len);
+        Ok(at)
+    }
+
+    /// Emulated `shmdt` of a segment the guest attached at `addr`.
+    pub fn detach_shm(&mut self, addr: u64) -> Result<(), i32> {
+        let len = self.shm_len(addr).ok_or(EINVAL)?;
+        unsafe { sys::shmdt(addr) }?;
+        self.intervals.remove(addr, addr + len);
+        self.shm.remove(&addr);
+        Ok(())
+    }
+
+    /// Length of the segment the guest attached at `addr`, if any.
+    pub fn shm_len(&self, addr: u64) -> Option<u64> {
+        self.shm.get(&addr).copied()
+    }
+
+    /// Forgets the segments attached inside `[start, end)`, whose pages are gone.
+    fn forget_shm(&mut self, start: u64, end: u64) {
+        self.shm.retain(|&at, _| at < start || at >= end);
     }
 
     /// Emulated `mremap` of a guest range: shrinks or grows in place, or moves to the
@@ -478,6 +565,7 @@ impl Mem {
             return Err(e);
         }
         self.intervals.remove(old, old + old_len);
+        self.forget_shm(old, old + old_len);
         self.intervals.insert(target, target + new_len, prot);
         Ok(target)
     }

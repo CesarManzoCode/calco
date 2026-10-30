@@ -342,6 +342,8 @@ impl State {
             }
             // Translations of pages dropped by MADV_DONTNEED went before (`invalidated`).
             MADVISE => pass(nr, a),
+            SHMAT => result(mem.attach_shm(a[0] as i32, a[1], a[2] as u32)),
+            SHMDT => result(mem.detach_shm(a[0]).map(|()| 0)),
             PRCTL => match a[0] {
                 PR_SET_PDEATHSIG | PR_SET_NAME | PR_GET_NAME => pass(nr, a),
                 _ => err(EINVAL),
@@ -586,6 +588,19 @@ pub fn invalidated(nr: u64, a: [u64; 6]) -> Vec<core::ops::Range<u64>> {
     out
 }
 
+/// The guest range whose translations go before `shmdt`, or before `shmat` with
+/// `SHM_REMAP` over a given address: the length is not in the arguments, but in the
+/// attached segments of `mem` or in the segment itself.
+pub fn shm_invalidated(mem: &Mem, nr: u64, a: [u64; 6]) -> Option<core::ops::Range<u64>> {
+    match nr {
+        SHMDT => smc::span(a[0], mem.shm_len(a[0])?),
+        SHMAT if a[1] != 0 && a[2] & sys::SHM_REMAP as u64 != 0 => {
+            smc::span(a[1], sys::shm_size(a[0] as i32).ok()?)
+        }
+        _ => None,
+    }
+}
+
 /// The range of an `mprotect` that keeps execute, whose pages with translations the
 /// guest may now write: they lose write in the host again after the call.
 pub fn reprotected(nr: u64, a: [u64; 6]) -> Option<(core::ops::Range<u64>, u32)> {
@@ -603,7 +618,10 @@ fn locked(cpu: &mut Cpu, me: &Arc<Member>, nr: u64, a: [u64; 6]) -> i64 {
     let shared = thread::shared();
     let forks = matches!(nr, FORK | VFORK)
         || (nr == CLONE && thread::clone_kind(a[0]) == Ok(CloneKind::Fork));
-    let drops = invalidated(nr, a);
+    let mut drops = invalidated(nr, a);
+    if matches!(nr, SHMAT | SHMDT) {
+        drops.extend(shm_invalidated(&shared.world().mem, nr, a));
+    }
     let keeps = reprotected(nr, a);
     let mut jit = (forks || !drops.is_empty() || keeps.is_some()).then(|| shared.jit());
     if let Some(jit) = jit.as_mut() {

@@ -578,8 +578,3 @@ fn probe_tf() {
     core::hint::black_box(0u64);
     PROBE.store(PROBE_IDLE, Ordering::SeqCst);
 }
-
-/// Whether the TF probe succeeded.
-pub fn tf_works() -> bool {
-    TF_WORKS.load(Ordering::Acquire)
-}

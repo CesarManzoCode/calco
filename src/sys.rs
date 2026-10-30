@@ -14,10 +14,13 @@ pub const SYS_RT_SIGACTION: usize = 13;
 pub const SYS_RT_SIGPROCMASK: usize = 14;
 pub const SYS_RT_SIGRETURN: usize = 15;
 pub const SYS_MREMAP: usize = 25;
+pub const SYS_SHMAT: usize = 30;
+pub const SYS_SHMCTL: usize = 31;
 pub const SYS_CLONE: usize = 56;
 pub const SYS_EXECVE: usize = 59;
 pub const SYS_GETPID: usize = 39;
 pub const SYS_EXIT: usize = 60;
+pub const SYS_SHMDT: usize = 67;
 pub const SYS_GETUID: usize = 102;
 pub const SYS_GETGID: usize = 104;
 pub const SYS_GETEUID: usize = 107;
@@ -53,6 +56,13 @@ pub const MREMAP_FIXED: u32 = 2;
 pub const MREMAP_DONTUNMAP: u32 = 4;
 // /usr/include/asm-generic/mman.h
 pub const MAP_NORESERVE: u32 = 0x4000;
+// /usr/include/linux/shm.h
+pub const SHM_RDONLY: u32 = 0o10000;
+pub const SHM_RND: u32 = 0o20000;
+pub const SHM_REMAP: u32 = 0o40000;
+pub const SHM_EXEC: u32 = 0o100000;
+// /usr/include/linux/ipc.h
+const IPC_STAT: usize = 2;
 
 // /usr/include/asm-generic/errno-base.h
 pub const EPERM: i32 = 1;
@@ -247,6 +257,35 @@ pub unsafe fn mremap(
         )
     };
     check(ret).map(|v| v as u64)
+}
+
+/// # Safety
+/// The caller must own `[addr, addr + size)` when it gives `SHM_REMAP`.
+pub unsafe fn shmat(id: i32, addr: u64, flags: u32) -> Result<u64, i32> {
+    let ret = unsafe {
+        syscall3(
+            SYS_SHMAT,
+            id as isize as usize,
+            addr as usize,
+            flags as usize,
+        )
+    };
+    check(ret).map(|v| v as u64)
+}
+
+/// # Safety
+/// The caller must own the segment attached at `addr`.
+pub unsafe fn shmdt(addr: u64) -> Result<(), i32> {
+    check(unsafe { syscall1(SYS_SHMDT, addr as usize) }).map(|_| ())
+}
+
+/// Size in bytes of System V shared memory segment `id` (`shmctl(IPC_STAT)`).
+pub fn shm_size(id: i32) -> Result<u64, i32> {
+    // `struct shmid64_ds` of /usr/include/asm-generic/shmbuf.h: 112 bytes, `shm_segsz` at 48.
+    let mut ds = [0u64; 14];
+    let buf = ds.as_mut_ptr() as usize;
+    check(unsafe { syscall3(SYS_SHMCTL, id as isize as usize, IPC_STAT, buf) })?;
+    Ok(ds[6])
 }
 
 pub fn getuid() -> u64 {

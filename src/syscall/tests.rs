@@ -92,6 +92,10 @@ fn classification_of_numbers() {
         (202, Kind::Pass),
         (318, Kind::Pass),
         (MADVISE, Kind::Emulated),
+        (29, Kind::Pass),
+        (31, Kind::Pass),
+        (SHMAT, Kind::Emulated),
+        (SHMDT, Kind::Emulated),
         (WAIT4, Kind::Emulated),
         (EXECVE, Kind::Emulated),
         (MMAP, Kind::Emulated),
@@ -101,7 +105,7 @@ fn classification_of_numbers() {
         (RSEQ, Kind::Emulated),
         (CLONE3, Kind::Emulated),
         (EXIT_GROUP, Kind::Emulated),
-        (29, Kind::Unlisted),
+        (68, Kind::Unlisted),
         (101, Kind::Unlisted),
         (425, Kind::Unlisted),
         (1000, Kind::Unlisted),
@@ -136,7 +140,7 @@ fn deferred_calls_return_enosys() {
     let mut st = state();
     let mut cpu = Cpu::new(0, 0);
     let mut mem = Mem::new();
-    for nr in [RSEQ, CLONE3, 29, 1000] {
+    for nr in [RSEQ, CLONE3, 68, 1000] {
         assert_eq!(
             st.dispatch(&mut cpu, &mut mem, nr, [0; 6]),
             -(ENOSYS as i64),

@@ -1,0 +1,4 @@
+# calco links glibc statically: the guest's ld.so and libc.so.6 must be the only copies
+# in the process, and they carry no host PROT_EXEC (contract 3.1).
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-feature=+crt-static"]

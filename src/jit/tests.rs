@@ -442,7 +442,7 @@ fn guest_flag_writers_are_the_only_ones() {
 
 #[test]
 fn block_map_finds_grows_and_clears() {
-    let mut m = BlockMap::new();
+    let m = BlockMap::new();
     for i in 0..20_000u32 {
         m.insert(0x40_0000 + 16 * i as u64, i);
     }

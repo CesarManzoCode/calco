@@ -20,11 +20,13 @@ pub const RT_SIGPROCMASK: u64 = 14;
 pub const RT_SIGRETURN: u64 = 15;
 pub const MREMAP: u64 = 25;
 pub const MADVISE: u64 = 28;
+pub const SHMAT: u64 = 30;
 pub const CLONE: u64 = 56;
 pub const FORK: u64 = 57;
 pub const VFORK: u64 = 58;
 pub const EXECVE: u64 = 59;
 pub const EXIT: u64 = 60;
+pub const SHMDT: u64 = 67;
 pub const WAIT4: u64 = 61;
 pub const KILL: u64 = 62;
 pub const READLINK: u64 = 89;
@@ -65,11 +67,13 @@ pub const EMULATED: &[(u64, &str)] = &[
     (RT_SIGRETURN, "rt_sigreturn"),
     (MREMAP, "mremap"),
     (MADVISE, "madvise"),
+    (SHMAT, "shmat"),
     (CLONE, "clone"),
     (FORK, "fork"),
     (VFORK, "vfork"),
     (EXECVE, "execve"),
     (EXIT, "exit"),
+    (SHMDT, "shmdt"),
     (WAIT4, "wait4"),
     (KILL, "kill"),
     (READLINK, "readlink"),
@@ -251,6 +255,8 @@ pub const PASS: &[(u64, &str)] = &[
     (294, "inotify_init1"),
     (254, "inotify_add_watch"),
     (255, "inotify_rm_watch"),
+    (29, "shmget"),
+    (31, "shmctl"),
 ];
 
 pub fn classify(nr: u64) -> Kind {

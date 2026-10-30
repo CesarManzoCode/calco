@@ -278,7 +278,7 @@ pub fn run_main(mut cpu: Box<Cpu>, mem: Mem, jit: Jit, state: State) -> ! {
     cpu.tid = sys::gettid();
     // Translated code reaches the Cpu through GS; nothing else in calco uses GS.
     unsafe { sys::set_gs_base(&mut *cpu as *mut Cpu as u64) };
-    signal::init(&mut cpu, &mut shared().world().state.signals);
+    signal::init(&mut cpu, &mut self::shared().world().state.signals);
     let me = register(cpu.tid);
     let code = jit::run(&mut cpu, &me);
     finish(&mut cpu, &me);

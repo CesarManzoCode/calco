@@ -19,7 +19,7 @@ mod host;
 use core::cell::{Cell, UnsafeCell};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-pub use self::host::{die, init, init_thread, install, safe_syscall, tf_works};
+pub use self::host::{die, init, init_thread, install, safe_syscall};
 
 use self::frame::{AltStack, FRAME_INFO, FRAME_SIZE, FRAME_UC, SIGINFO_SIZE, UC_SIZE};
 use crate::cpu::{Cpu, RAX, RDI, RDX, RSI, RSP};

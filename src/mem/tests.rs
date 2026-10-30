@@ -183,3 +183,54 @@ fn brk_grows_shrinks_and_respects_limit() {
     assert_eq!(mem.brk(base), base);
     assert_eq!(mem.intervals.find(top - 1), None);
 }
+
+/// Permissions of the host mapping that starts at `addr`, from `/proc/self/maps`.
+fn host_perms(addr: u64) -> Option<String> {
+    let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+    let start = format!("{addr:x}-");
+    let line = maps.lines().find(|l| l.starts_with(&start))?;
+    line.split_whitespace().nth(1).map(str::to_owned)
+}
+
+#[test]
+fn shm_attaches_in_the_window_without_host_exec() {
+    // /usr/include/linux/ipc.h
+    const IPC_PRIVATE: usize = 0;
+    const IPC_CREAT: usize = 0o1000;
+    const IPC_RMID: usize = 0;
+    let size = 3 * PAGE_SIZE - 100;
+    let id = unsafe { sys::syscall3(29, IPC_PRIVATE, size as usize, IPC_CREAT | 0o600) };
+    let id = sys::check(id).unwrap() as i32;
+    assert_eq!(sys::shm_size(id), Ok(size));
+
+    let mut mem = Mem::new();
+    mem.set_brk_base(0x0000_2d00_0000_0000);
+    let a = mem.attach_shm(id, 0, 0).unwrap();
+    assert_eq!(a, mem.window_start());
+    assert_eq!(mem.shm_len(a), Some(3 * PAGE_SIZE));
+    assert_eq!(
+        mem.intervals.find(a).map(|r| (r.end, r.prot)),
+        Some((a + 3 * PAGE_SIZE, RW))
+    );
+    unsafe { ((a + PAGE_SIZE) as *mut u8).write(0x5a) };
+
+    // A fixed address, rounded, read-only and executable for the guest only.
+    let want = a + (1 << 20);
+    let flags = SHM_RDONLY | SHM_EXEC | SHM_RND;
+    assert_eq!(mem.attach_shm(id, want, flags & !SHM_RND), Ok(want));
+    assert_eq!(mem.intervals.find(want).map(|r| r.prot), Some(RX));
+    assert_eq!(host_perms(want).as_deref(), Some("r--s"));
+    assert_eq!(unsafe { ((want + PAGE_SIZE) as *const u8).read() }, 0x5a);
+    // Over guest memory only with SHM_REMAP.
+    assert_eq!(mem.attach_shm(id, want + 123, flags), Err(EINVAL));
+    assert_eq!(mem.attach_shm(id, want + 123, flags | SHM_REMAP), Ok(want));
+    assert_eq!(mem.attach_shm(id, 0, SHM_REMAP), Err(EINVAL));
+
+    mem.detach_shm(a).unwrap();
+    mem.detach_shm(want).unwrap();
+    assert_eq!(mem.detach_shm(a), Err(EINVAL));
+    assert!(mem.intervals.regions().is_empty());
+    assert_eq!(host_perms(a), None);
+    sys::check(unsafe { sys::syscall3(31, id as usize, IPC_RMID, 0) }).unwrap();
+    assert_eq!(sys::shm_size(id), Err(EINVAL));
+}
