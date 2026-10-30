@@ -1,13 +1,17 @@
 //! calco: dynamic binary translator from x86-64 to x86-64 for Linux user-mode programs.
 
-// Modules expose what the JIT (k1-03 onward) consumes; until then much of it is unused.
+// Modules expose what later sprints consume (signals, threads, SMC); much is still unused.
 #![allow(dead_code)]
 
 mod cpu;
+mod cpuid;
 mod decode;
+mod emit;
+mod jit;
 mod loader;
 mod mem;
 mod sys;
+mod syscall;
 
 use std::env;
 use std::ffi::OsString;
@@ -78,6 +82,12 @@ fn main() {
     let mut mem = mem::Mem::new();
     let loaded =
         loader::load(&program, &mut mem, &argv, &envp, HWCAP_PENDING).unwrap_or_else(|e| fail(&e));
-    let _cpu = cpu::Cpu::new(loaded.entry, loaded.rsp);
-    fail("jit not implemented");
+    let mut cpu = cpu::Cpu::new(loaded.entry, loaded.rsp);
+    let mut jit = jit::Jit::new(&mem).unwrap_or_else(|e| {
+        fail(&format!(
+            "cannot open the code cache: {}",
+            std::io::Error::from_raw_os_error(e)
+        ))
+    });
+    jit::run(&mut cpu, &mut mem, &mut jit)
 }

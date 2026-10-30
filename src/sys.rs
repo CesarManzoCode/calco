@@ -6,13 +6,21 @@
 use core::arch::asm;
 
 // /usr/include/asm/unistd_64.h
+pub const SYS_WRITE: usize = 1;
 pub const SYS_MMAP: usize = 9;
 pub const SYS_MPROTECT: usize = 10;
 pub const SYS_MUNMAP: usize = 11;
+pub const SYS_RT_SIGACTION: usize = 13;
+pub const SYS_RT_SIGPROCMASK: usize = 14;
+pub const SYS_GETPID: usize = 39;
+pub const SYS_EXIT: usize = 60;
 pub const SYS_GETUID: usize = 102;
 pub const SYS_GETGID: usize = 104;
 pub const SYS_GETEUID: usize = 107;
 pub const SYS_GETEGID: usize = 108;
+pub const SYS_GETTID: usize = 186;
+pub const SYS_EXIT_GROUP: usize = 231;
+pub const SYS_TGKILL: usize = 234;
 pub const SYS_GETRANDOM: usize = 318;
 
 // /usr/include/asm-generic/mman-common.h
@@ -39,6 +47,12 @@ pub const ENOMEM: i32 = 12;
 pub const EACCES: i32 = 13;
 pub const EEXIST: i32 = 17;
 pub const EINVAL: i32 = 22;
+// /usr/include/asm-generic/errno.h
+pub const ENOSYS: i32 = 38;
+
+// /usr/include/asm-generic/signal-defs.h
+const SIG_DFL: usize = 0;
+const SIG_UNBLOCK: usize = 1;
 
 /// # Safety
 /// The call must be valid for the kernel with no arguments.
@@ -208,4 +222,55 @@ pub fn getrandom(buf: &mut [u8]) -> Result<(), i32> {
         }
     }
     Ok(())
+}
+
+/// `struct sigaction` as `rt_sigaction` takes it on x86-64.
+#[repr(C)]
+struct KernelSigaction {
+    handler: usize,
+    flags: u64,
+    restorer: usize,
+    mask: u64,
+}
+
+/// Dies by `sig` as its default action does: restores `SIG_DFL`, unblocks it and sends it
+/// to this thread, so the process ends by the same signal as natively.
+pub fn die_by_signal(sig: i32) -> ! {
+    let action = KernelSigaction {
+        handler: SIG_DFL,
+        flags: 0,
+        restorer: 0,
+        mask: 0,
+    };
+    let set: u64 = 1 << (sig - 1);
+    unsafe {
+        syscall4(
+            SYS_RT_SIGACTION,
+            sig as usize,
+            &action as *const KernelSigaction as usize,
+            0,
+            8,
+        );
+        syscall4(
+            SYS_RT_SIGPROCMASK,
+            SIG_UNBLOCK,
+            &set as *const u64 as usize,
+            0,
+            8,
+        );
+        let pid = syscall0(SYS_GETPID) as usize;
+        let tid = syscall0(SYS_GETTID) as usize;
+        syscall3(SYS_TGKILL, pid, tid, sig as usize);
+        // Only if the signal did not kill: the exit status a shell shows for it.
+        syscall1(SYS_EXIT_GROUP, 128 + sig as usize);
+    }
+    unreachable!("exit_group returned")
+}
+
+/// Points the GS base of this thread at `base` (`wrgsbase`, FSGSBASE is enabled).
+///
+/// # Safety
+/// Nothing else in the thread may rely on the GS base.
+pub unsafe fn set_gs_base(base: u64) {
+    unsafe { asm!("wrgsbase {}", in(reg) base, options(nostack, preserves_flags)) };
 }

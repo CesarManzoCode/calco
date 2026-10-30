@@ -8,6 +8,8 @@ Fuente única de lo que calco no demuestra o no hace. Ningún otro archivo los r
 - CPUID anuncia solo el nivel x86-64-v2 sin XSAVE. Una instrucción que el CPU de la máquina sí ejecuta pero que no está anunciada ni en la tabla del alcance (por ejemplo AVX, BMI, MOVBE, `rdfsbase`) da SIGILL bajo calco aunque en nativo funcione.
 - `rep bsf` y `rep bsr` (`F3 0F BC/BD`) se ejecutan como TZCNT/LZCNT, igual que en el CPU anfitrión, aunque CPUID no anuncie esas extensiones.
 - Los saltos y llamadas cercanos con prefijo `66` dan SIGILL.
+- El retorno lejano (`retf`, `CA`/`CB`) termina con SIGSEGV, aunque en nativo un retorno lejano al selector de código de usuario funciona.
+- Las instrucciones cuyo prefijo de segmento afecta a un operando de memoria implícito (`movs`, `cmps`, `lods`, `xlat`, `maskmovq`, `maskmovdqu`) dan SIGILL si llevan prefijo GS.
 
 ## Exactitud
 
