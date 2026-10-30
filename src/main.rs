@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 mod cpu;
+mod decode;
 mod loader;
 mod mem;
 mod sys;
