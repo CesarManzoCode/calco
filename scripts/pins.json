@@ -1,0 +1,57 @@
+{
+  "qemu-user": {
+    "kind": "archive",
+    "version": "11.1.2-1",
+    "file": "qemu-user-static-11.1.2-1-x86_64.pkg.tar.zst",
+    "urls": [
+      "https://geo.mirror.pkgbuild.com/extra/os/x86_64/qemu-user-static-11.1.2-1-x86_64.pkg.tar.zst",
+      "https://archive.archlinux.org/packages/q/qemu-user-static/qemu-user-static-11.1.2-1-x86_64.pkg.tar.zst"
+    ],
+    "sha256": "e2a0e8a6c65768c9f9b0e47ccf701b4dca03f9f97cda093dc1c0ddf4b23a67c4",
+    "extract": {
+      "member": "usr/bin/qemu-x86_64-static",
+      "to": "build/tools/qemu-x86_64-static"
+    }
+  },
+  "qemu-tests": {
+    "kind": "files",
+    "version": "v11.1.2",
+    "commit": "4fc49f46dc95d4a27de2509e7fceb2931e91faeb",
+    "url": "https://gitlab.com/qemu-project/qemu/-/raw/{commit}/tests/tcg/{path}",
+    "files": {
+      "i386/test-i386.c": "f43060b677a63ce403e3c56229877a944abb69f76d87d78e162bfb9ad0e6287e",
+      "i386/test-i386.h": "f7a282f03e66f703c1e67ce38d9032607e062c973c318bc119de2b7a109bab47",
+      "i386/test-i386-shift.h": "889acabbf3aaae96bf552796280d1ca006d75f5ea72835b8d852c27d411f1eed",
+      "i386/test-i386-muldiv.h": "2ae14009409e192eeca56af37da23be4f6134964b417bdf2eec1989446ac694f",
+      "multiarch/linux/linux-test.c": "a558f9abd17eaae157bb0f610039d429e6452eeac7af8560d0f6eb4a034e22a0",
+      "multiarch/testthread.c": "c7b0c7f0b33d42240f69d6b9a4ddd65e42133e1045659e5cde7a59419da7662c",
+      "multiarch/sha512.c": "675829f3b5bebb78c19cd687319f52a7ef3a881ccb618b24f40bbe379a9f86ab"
+    }
+  },
+  "busybox": {
+    "kind": "archive",
+    "version": "1.36.1",
+    "file": "busybox-1.36.1.tar.bz2",
+    "urls": ["https://busybox.net/downloads/busybox-1.36.1.tar.bz2"],
+    "sha256": "b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314"
+  },
+  "sqlite": {
+    "kind": "archive",
+    "version": "3.54.1",
+    "file": "sqlite-amalgamation-3540100.zip",
+    "urls": ["https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip"],
+    "sha256": "0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9"
+  },
+  "lua": {
+    "kind": "archive",
+    "version": "5.5.1",
+    "file": "lua-5.5.1.tar.gz",
+    "urls": ["https://www.lua.org/ftp/lua-5.5.1.tar.gz"],
+    "sha256": "1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce"
+  },
+  "tcc": {
+    "kind": "git",
+    "url": "https://repo.or.cz/tinycc.git",
+    "commit": "e23dabed154a8495f3ac1ff3cc9d04fa1c207893"
+  }
+}

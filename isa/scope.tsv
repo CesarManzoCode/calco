@@ -1,0 +1,141 @@
+mnemonic	ext	forms	flags_read	flags_written	flags_undefined	ref
+add	base	bwdq:rm,r|bwdq:r,m|bwdq:rm,i|wdq:rm,i8|bwdq:a,i		CF PF AF ZF SF OF		APM3 ch.3 ADD
+sub	base	bwdq:rm,r|bwdq:r,m|bwdq:rm,i|wdq:rm,i8|bwdq:a,i		CF PF AF ZF SF OF		APM3 ch.3 SUB
+cmp	base	bwdq:rm,r|bwdq:r,m|bwdq:rm,i|wdq:rm,i8|bwdq:a,i		CF PF AF ZF SF OF		APM3 ch.3 CMP
+adc	base	bwdq:rm,r|bwdq:r,m|bwdq:rm,i|wdq:rm,i8|bwdq:a,i	CF	CF PF AF ZF SF OF		APM3 ch.3 ADC
+sbb	base	bwdq:rm,r|bwdq:r,m|bwdq:rm,i|wdq:rm,i8|bwdq:a,i	CF	CF PF AF ZF SF OF		APM3 ch.3 SBB
+and	base	bwdq:rm,r|bwdq:r,m|bwdq:rm,i|wdq:rm,i8|bwdq:a,i		CF PF ZF SF OF	AF	APM3 ch.3 AND
+or	base	bwdq:rm,r|bwdq:r,m|bwdq:rm,i|wdq:rm,i8|bwdq:a,i		CF PF ZF SF OF	AF	APM3 ch.3 OR
+xor	base	bwdq:rm,r|bwdq:r,m|bwdq:rm,i|wdq:rm,i8|bwdq:a,i		CF PF ZF SF OF	AF	APM3 ch.3 XOR
+test	base	bwdq:rm,r|bwdq:rm,i|bwdq:a,i		CF PF ZF SF OF	AF	APM3 ch.3 TEST
+inc	base	bwdq:rm		PF AF ZF SF OF		APM3 ch.3 INC
+dec	base	bwdq:rm		PF AF ZF SF OF		APM3 ch.3 DEC
+neg	base	bwdq:rm		CF PF AF ZF SF OF		APM3 ch.3 NEG
+not	base	bwdq:rm				APM3 ch.3 NOT
+mov	base	bwdq:rm,r|bwdq:r,m|bwdq:rm,i				APM3 ch.3 MOV
+movabs	base	q:r,iq				APM3 ch.3 MOV
+lea	base	dq:r,m				APM3 ch.3 LEA
+movsx	base	wdq:r,rm8|dq:r,rm16				APM3 ch.3 MOVSX
+movzx	base	wdq:r,rm8|dq:r,rm16				APM3 ch.3 MOVZX
+movsxd	base	q:r,rm32				APM3 ch.3 MOVSXD
+xchg	base	bwdq:rm,r|wdq:a,r				APM3 ch.3 XCHG
+xadd	base	bwdq:rm,r		CF PF AF ZF SF OF		APM3 ch.3 XADD
+cmpxchg	base	bwdq:rm,r		CF PF AF ZF SF OF		APM3 ch.3 CMPXCHG
+cmpxchg8b	base	-:m64		ZF		APM3 ch.3 CMPXCHG8B
+cmpxchg16b	base	-:m128		ZF		APM3 ch.3 CMPXCHG16B
+shl	base	bwdq:rm,one|bwdq:rm,cl|bwdq:rm,u8		?CF ?PF ?ZF ?SF	CF OF AF	APM3 ch.3 SAL/SHL
+shr	base	bwdq:rm,one|bwdq:rm,cl|bwdq:rm,u8		?CF ?PF ?ZF ?SF	CF OF AF	APM3 ch.3 SHR
+sar	base	bwdq:rm,one|bwdq:rm,cl|bwdq:rm,u8		?CF ?PF ?ZF ?SF	CF OF AF	APM3 ch.3 SAR
+rol	base	bwdq:rm,one|bwdq:rm,cl|bwdq:rm,u8		?CF	OF	APM3 ch.3 ROL
+ror	base	bwdq:rm,one|bwdq:rm,cl|bwdq:rm,u8		?CF	OF	APM3 ch.3 ROR
+rcl	base	bwdq:rm,one|bwdq:rm,cl|bwdq:rm,u8	CF	?CF	OF	APM3 ch.3 RCL
+rcr	base	bwdq:rm,one|bwdq:rm,cl|bwdq:rm,u8	CF	?CF	OF	APM3 ch.3 RCR
+shld	base	wdq:rm,r,u8|wdq:rm,r,cl		?CF ?PF ?ZF ?SF	CF PF AF ZF SF OF	APM3 ch.3 SHLD
+shrd	base	wdq:rm,r,u8|wdq:rm,r,cl		?CF ?PF ?ZF ?SF	CF PF AF ZF SF OF	APM3 ch.3 SHRD
+bt	base	wdq:rm,r|wdq:rm,u8		CF	PF AF SF OF	APM3 ch.3 BT
+bts	base	wdq:rm,r|wdq:rm,u8		CF	PF AF SF OF	APM3 ch.3 BTS
+btr	base	wdq:rm,r|wdq:rm,u8		CF	PF AF SF OF	APM3 ch.3 BTR
+btc	base	wdq:rm,r|wdq:rm,u8		CF	PF AF SF OF	APM3 ch.3 BTC
+bsf	base	wdq:r,rm		ZF	CF PF AF SF OF	APM3 ch.3 BSF
+bsr	base	wdq:r,rm		ZF	CF PF AF SF OF	APM3 ch.3 BSR
+bswap	base	dq:r				APM3 ch.3 BSWAP
+mul	base	bwdq:rm		CF OF	PF AF ZF SF	APM3 ch.3 MUL
+imul	base	bwdq:rm|wdq:r,rm|wdq:r,rm,i|wdq:r,rm,i8		CF OF	PF AF ZF SF	APM3 ch.3 IMUL
+div	base	bwdq:rm			CF PF AF ZF SF OF	APM3 ch.3 DIV
+idiv	base	bwdq:rm			CF PF AF ZF SF OF	APM3 ch.3 IDIV
+seto	base	b:rm	OF			APM3 ch.3 SETcc
+setno	base	b:rm	OF			APM3 ch.3 SETcc
+setb	base	b:rm	CF			APM3 ch.3 SETcc
+setae	base	b:rm	CF			APM3 ch.3 SETcc
+sete	base	b:rm	ZF			APM3 ch.3 SETcc
+setne	base	b:rm	ZF			APM3 ch.3 SETcc
+setbe	base	b:rm	CF ZF			APM3 ch.3 SETcc
+seta	base	b:rm	CF ZF			APM3 ch.3 SETcc
+sets	base	b:rm	SF			APM3 ch.3 SETcc
+setns	base	b:rm	SF			APM3 ch.3 SETcc
+setp	base	b:rm	PF			APM3 ch.3 SETcc
+setnp	base	b:rm	PF			APM3 ch.3 SETcc
+setl	base	b:rm	SF OF			APM3 ch.3 SETcc
+setge	base	b:rm	SF OF			APM3 ch.3 SETcc
+setle	base	b:rm	ZF SF OF			APM3 ch.3 SETcc
+setg	base	b:rm	ZF SF OF			APM3 ch.3 SETcc
+cmovo	base	wdq:r,rm	OF			APM3 ch.3 CMOVcc
+cmovno	base	wdq:r,rm	OF			APM3 ch.3 CMOVcc
+cmovb	base	wdq:r,rm	CF			APM3 ch.3 CMOVcc
+cmovae	base	wdq:r,rm	CF			APM3 ch.3 CMOVcc
+cmove	base	wdq:r,rm	ZF			APM3 ch.3 CMOVcc
+cmovne	base	wdq:r,rm	ZF			APM3 ch.3 CMOVcc
+cmovbe	base	wdq:r,rm	CF ZF			APM3 ch.3 CMOVcc
+cmova	base	wdq:r,rm	CF ZF			APM3 ch.3 CMOVcc
+cmovs	base	wdq:r,rm	SF			APM3 ch.3 CMOVcc
+cmovns	base	wdq:r,rm	SF			APM3 ch.3 CMOVcc
+cmovp	base	wdq:r,rm	PF			APM3 ch.3 CMOVcc
+cmovnp	base	wdq:r,rm	PF			APM3 ch.3 CMOVcc
+cmovl	base	wdq:r,rm	SF OF			APM3 ch.3 CMOVcc
+cmovge	base	wdq:r,rm	SF OF			APM3 ch.3 CMOVcc
+cmovle	base	wdq:r,rm	ZF SF OF			APM3 ch.3 CMOVcc
+cmovg	base	wdq:r,rm	ZF SF OF			APM3 ch.3 CMOVcc
+jo	base	-:rel	OF			APM3 ch.3 Jcc
+jno	base	-:rel	OF			APM3 ch.3 Jcc
+jb	base	-:rel	CF			APM3 ch.3 Jcc
+jae	base	-:rel	CF			APM3 ch.3 Jcc
+je	base	-:rel	ZF			APM3 ch.3 Jcc
+jne	base	-:rel	ZF			APM3 ch.3 Jcc
+jbe	base	-:rel	CF ZF			APM3 ch.3 Jcc
+ja	base	-:rel	CF ZF			APM3 ch.3 Jcc
+js	base	-:rel	SF			APM3 ch.3 Jcc
+jns	base	-:rel	SF			APM3 ch.3 Jcc
+jp	base	-:rel	PF			APM3 ch.3 Jcc
+jnp	base	-:rel	PF			APM3 ch.3 Jcc
+jl	base	-:rel	SF OF			APM3 ch.3 Jcc
+jge	base	-:rel	SF OF			APM3 ch.3 Jcc
+jle	base	-:rel	ZF SF OF			APM3 ch.3 Jcc
+jg	base	-:rel	ZF SF OF			APM3 ch.3 Jcc
+jmp	base	-:rel|-:r64|-:m64				APM3 ch.3 JMP (Near)
+loop	base	-:rel				APM3 ch.3 LOOPcc
+loope	base	-:rel	ZF			APM3 ch.3 LOOPcc
+loopne	base	-:rel	ZF			APM3 ch.3 LOOPcc
+jrcxz	base	-:rel				APM3 ch.3 JrCXZ
+call	base	-:rel|-:r64|-:m64				APM3 ch.3 CALL (Near)
+ret	base	-:|-:u16				APM3 ch.3 RET (Near)
+push	base	q:r|q:m|-:i				APM3 ch.3 PUSH
+pop	base	q:r|q:m				APM3 ch.3 POP
+pushf	base	-:	CF PF AF ZF SF OF			APM3 ch.3 PUSHFQ
+popf	base	-:		CF PF AF ZF SF OF		APM3 ch.3 POPFQ
+lahf	base	-:	CF PF AF ZF SF			APM3 ch.3 LAHF
+sahf	base	-:		CF PF AF ZF SF		APM3 ch.3 SAHF
+clc	base	-:		CF		APM3 ch.3 CLC
+stc	base	-:		CF		APM3 ch.3 STC
+cmc	base	-:	CF	CF		APM3 ch.3 CMC
+cld	base	-:				APM3 ch.3 CLD
+std	base	-:				APM3 ch.3 STD
+cbw	base	-:				APM3 ch.3 CBW/CWDE/CDQE
+cwde	base	-:				APM3 ch.3 CBW/CWDE/CDQE
+cdqe	base	-:				APM3 ch.3 CBW/CWDE/CDQE
+cwd	base	-:				APM3 ch.3 CWD/CDQ/CQO
+cdq	base	-:				APM3 ch.3 CWD/CDQ/CQO
+cqo	base	-:				APM3 ch.3 CWD/CDQ/CQO
+movs	base	bwdq:				APM3 ch.3 MOVSx
+stos	base	bwdq:				APM3 ch.3 STOSx
+lods	base	bwdq:				APM3 ch.3 LODSx
+cmps	base	bwdq:		?CF ?PF ?AF ?ZF ?SF ?OF		APM3 ch.3 CMPSx
+scas	base	bwdq:		?CF ?PF ?AF ?ZF ?SF ?OF		APM3 ch.3 SCASx
+enter	base	-:u16,u8				APM3 ch.3 ENTER
+leave	base	-:				APM3 ch.3 LEAVE
+xlat	base	-:				APM3 ch.3 XLATB
+popcnt	sse4.2	wdq:r,rm		CF PF AF ZF SF OF		APM3 ch.3 POPCNT
+crc32	sse4.2	-:r32,rm8|-:r32,rm16|-:r32,rm32|-:r64,rm8|-:r64,rm64				APM3 ch.3 CRC32
+nop	base	-:|wd:m				APM3 ch.3 NOP
+pause	base	-:				APM3 ch.3 PAUSE
+lfence	sse2	-:				APM3 ch.3 LFENCE
+mfence	sse2	-:				APM3 ch.3 MFENCE
+sfence	sse	-:				APM3 ch.3 SFENCE
+syscall	base	-:				APM3 ch.3 SYSCALL
+cpuid	base	-:				APM3 ch.3 CPUID
+rdtsc	base	-:				APM3 ch.3 RDTSC
+rdtscp	base	-:				APM3 ch.3 RDTSCP
+rdrand	base	wdq:r		CF PF AF ZF SF OF		APM3 ch.3 RDRAND
+ud2	base	-:				APM3 ch.3 UD2
+int3	base	-:				APM3 ch.3 INT3
+int	base	-:u8				APM3 ch.3 INT n
+hlt	base	-:				APM3 ch.4 HLT
