@@ -24,7 +24,7 @@ target/release/calco ./programa args...
 | Fase | Contenido | Estado |
 | --- | --- | --- |
 | K0 | Fundación: contrato, investigación, plan y comando de chequeo | Terminado |
-| K1 | Núcleo y arnés: carga de ELF estáticos, decodificador, JIT, CPUID, comparación contra el CPU, pruebas ISA de QEMU | Pendiente |
+| K1 | Núcleo y arnés: carga de ELF estáticos sin permiso de ejecución en el invitado, decodificador table-driven del alcance (`isa/scope.tsv`), JIT por recodificación con caché de código y encadenamiento, CPUID filtrado a x86-64-v2, llamadas al sistema básicas; arnés con generador aleatorio, comparación contra el CPU con máscara de flags indefinidas, mutantes y reductor ddmin; scripts `random_compare.py`, `coverage.py`, `mutants.py`, `reduce_check.py`, `qemu_tcg.py` (`test-x86_64`, `sha512-sse`) y los demás de K1 en la sección 6 del contrato | Implementado; sin verificar hasta el cierre del K |
 | K2 | Sistema: llamadas al sistema, señales, hilos, código automodificable, ELF dinámicos | Pendiente |
 | K3 | Programas reales y rendimiento: busybox, SQLite, Lua, TCC, medición contra qemu-x86_64 | Pendiente |
 
