@@ -19,6 +19,10 @@ Fuente única de lo que calco no demuestra o no hace. Ningún otro archivo los r
 - El generador aleatorio no usa AH, BH, CH ni DH como operandos explícitos (solo en la preparación de `div` de 8 bits y, implícitos, en `lahf`/`sahf`), ni `push`/`pop` de 16 bits, ni prefijos de segmento.
 - La máscara de flags es conservadora en las instrucciones con cuenta (desplazamientos, rotaciones, `shld/shrd`, cadenas con `rep`): como la cuenta puede ser 0, las flags que escriben no se dan por definidas, y las que el manual deja indefinidas en algún caso se enmascaran siempre. La única excepción es `shl/shr/sar` con cuenta inmediata que, enmascarada como la enmascara el CPU, queda entre 1 y el ancho menos 1: ahí CF, PF, ZF y SF (y OF si la cuenta es 1) se dan por definidas; con cuenta en CL se sigue enmascarando todo.
 - RDTSC, RDTSCP, RDRAND, RCPPS, RCPSS, RSQRTPS, RSQRTSS y CPUID quedan fuera del generador aleatorio; solo se comprueba que corren sin error.
+- La comparación aleatoria no prueba fallas: el generador construye cada caso para que no falle (divisor no nulo, memoria dentro del búfer, excepciones x87 y SSE enmascaradas). Las excepciones de CPU y las señales que producen no se comparan contra el CPU en K1.
+- La cobertura cuenta mnemónicos de `isa/scope.tsv` (470 de 470 al cerrar K1), no cada forma de operandos ni cada codificación de un mnemónico.
+- Que el arnés detecte fallos se demuestra solo con los 6 mutantes fijos, cada uno de una línea en `emit/` o `jit/`. La reducción a 3 instrucciones o menos se demuestra solo sobre sus contraejemplos.
+- El número de discrepancias de qemu-x86_64 y el resultado del modo estricto no quedaron registrados al cerrar K1.
 
 ## Sistema
 
@@ -39,4 +43,5 @@ Fuente única de lo que calco no demuestra o no hace. Ningún otro archivo los r
 
 - Todas las mediciones son de una sola máquina, sin root, sin aislar el sistema más allá de fijar un núcleo.
 - La comparación con nativo es un costo de traducción, no una comparación de velocidad entre iguales.
+- En K1 el código de verificación es mayor que el del traductor (`python3 scripts/loc.py`: `traductor: 3927`, `verificacion: 4450`). El criterio «arnés menor que traductor» no se cumple en K1 y se evalúa en K2.
 - `testthread` se compara por hilo y como multiconjunto de líneas, porque su orden global no es estable ni en nativo.
