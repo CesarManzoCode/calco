@@ -63,10 +63,11 @@ class Result:
         return f"exit {self.returncode}"
 
 
-def run(cmd, stdin=b"", env=None, timeout=120):
+def run(cmd, stdin=b"", env=None, timeout=120, cwd=None):
     """Runs `cmd` and returns its stdout, stderr and exit code."""
     proc = subprocess.run(
-        [str(c) for c in cmd], input=stdin, capture_output=True, env=env, timeout=timeout
+        [str(c) for c in cmd], input=stdin, capture_output=True, env=env, timeout=timeout,
+        cwd=cwd,
     )
     return Result(proc.stdout, proc.stderr, proc.returncode)
 

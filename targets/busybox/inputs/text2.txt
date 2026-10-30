@@ -1,0 +1,11 @@
+The quick brown fox jumps over the lazy dog.
+Pack my box with five dozen liquor jugs.
+How quickly daft zebras jump!
+	Tabs	and   spaces   stay as they are.
+the end of the first paragraph
+
+Sphinx of black quartz, judge my vow.
+A line added in the second file.
+Mixed CASE line with UPPER and lower words.
+Trailing spaces here   
+The last line has no final newline? No, it has one.
