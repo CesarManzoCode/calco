@@ -87,11 +87,14 @@ def case_text(case):
     out += [f"\tmov {r}, [rip + init_{n} + {INIT_GPR + 8 * k}]"
             for k, r in enumerate(gen.R64) if k != gen.RSP]
     ids = [item.id for item in case.items]
+    # `case_N` and `case_N_end` are symbols, so `objdump` shows where the sequence is
+    # (scripts/coverage.py counts only what lies between them).
+    out.append(f"case_{n}:")
     for item in case.items:
         target = next((f".L{n}_{i}" for i in ids if i >= (item.target or 0)), f".L{n}_end")
         out.append(f".L{n}_{item.id}:\t# {item.mnemonic}")
         out += ["\t" + line.replace("{T}", target) for line in item.lines]
-    out += [f".L{n}_end:", "\tcall dump"]
+    out += [f".L{n}_end:", f"case_{n}_end:", "\tcall dump"]
     return out
 
 

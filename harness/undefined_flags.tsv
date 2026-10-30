@@ -1,0 +1,26 @@
+# Flags indefinidas por mnemónico (contrato 4.2). Referencia principal: AMD64 Architecture Programmer's Manual, Vol. 3 (pub. 24594), revisión 3.37 (https://docs.amd.com/v/u/en-US/24594_3.37), tabla «rFLAGS Affected» de cada instrucción del capítulo 3. Segunda referencia: Intel 64 and IA-32 Architectures Software Developer's Manual, Vol. 2, versión 093 (página de descargas de Intel, actualizada el 2026-10-09), sección «Flags Affected».
+# Transcrito en k1-06 a partir de esas secciones; las filas deben coincidir con la columna flags_undefined de isa/scope.tsv (scripts/mask_check.py lo comprueba).
+mnemonic	undefined	ref
+and	AF	APM3 24594 rev 3.37 ch.3 AND; SDM Vol. 2 v093 AND
+or	AF	APM3 24594 rev 3.37 ch.3 OR; SDM Vol. 2 v093 OR
+xor	AF	APM3 24594 rev 3.37 ch.3 XOR; SDM Vol. 2 v093 XOR
+test	AF	APM3 24594 rev 3.37 ch.3 TEST; SDM Vol. 2 v093 TEST
+shl	CF OF AF	APM3 24594 rev 3.37 ch.3 SAL/SHL; SDM Vol. 2 v093 SAL/SAR/SHL/SHR
+shr	CF OF AF	APM3 24594 rev 3.37 ch.3 SHR; SDM Vol. 2 v093 SAL/SAR/SHL/SHR
+sar	CF OF AF	APM3 24594 rev 3.37 ch.3 SAR; SDM Vol. 2 v093 SAL/SAR/SHL/SHR
+rol	OF	APM3 24594 rev 3.37 ch.3 ROL; SDM Vol. 2 v093 RCL/RCR/ROL/ROR
+ror	OF	APM3 24594 rev 3.37 ch.3 ROR; SDM Vol. 2 v093 RCL/RCR/ROL/ROR
+rcl	OF	APM3 24594 rev 3.37 ch.3 RCL; SDM Vol. 2 v093 RCL/RCR/ROL/ROR
+rcr	OF	APM3 24594 rev 3.37 ch.3 RCR; SDM Vol. 2 v093 RCL/RCR/ROL/ROR
+shld	CF PF AF ZF SF OF	APM3 24594 rev 3.37 ch.3 SHLD; SDM Vol. 2 v093 SHLD
+shrd	CF PF AF ZF SF OF	APM3 24594 rev 3.37 ch.3 SHRD; SDM Vol. 2 v093 SHRD
+bt	PF AF SF OF	APM3 24594 rev 3.37 ch.3 BT; SDM Vol. 2 v093 BT
+bts	PF AF SF OF	APM3 24594 rev 3.37 ch.3 BTS; SDM Vol. 2 v093 BTS
+btr	PF AF SF OF	APM3 24594 rev 3.37 ch.3 BTR; SDM Vol. 2 v093 BTR
+btc	PF AF SF OF	APM3 24594 rev 3.37 ch.3 BTC; SDM Vol. 2 v093 BTC
+bsf	CF PF AF SF OF	APM3 24594 rev 3.37 ch.3 BSF; SDM Vol. 2 v093 BSF
+bsr	CF PF AF SF OF	APM3 24594 rev 3.37 ch.3 BSR; SDM Vol. 2 v093 BSR
+mul	PF AF ZF SF	APM3 24594 rev 3.37 ch.3 MUL; SDM Vol. 2 v093 MUL
+imul	PF AF ZF SF	APM3 24594 rev 3.37 ch.3 IMUL; SDM Vol. 2 v093 IMUL
+div	CF PF AF ZF SF OF	APM3 24594 rev 3.37 ch.3 DIV; SDM Vol. 2 v093 DIV
+idiv	CF PF AF ZF SF OF	APM3 24594 rev 3.37 ch.3 IDIV; SDM Vol. 2 v093 IDIV
