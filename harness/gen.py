@@ -16,7 +16,9 @@ and `mmm32` (MMX register or memory of 64/32 bits), `xm` (XMM or unaligned m128)
 (XMM or m128 aligned to 16), `xm16 xm32 xm64` (XMM or scalar memory), `m80`, `m128a`,
 `menv` (28-byte x87 environment), `msave` (108-byte x87 save area), `i3` and `i4`
 (immediates below 8 and 16).
-A flag written as `?XX` may be left unchanged (count or repeat of zero).
+A flag written as `?XX` may be left unchanged (count or repeat of zero). The one
+refinement over the table is `effect`: a shift by an immediate count between 1 and the
+width minus 1 writes CF, PF, ZF and SF, and also OF if the count is 1.
 
 The initial x87 state has every exception masked, a random precision and rounding
 control and 0–8 valid values on the stack; MXCSR has every exception masked and random
@@ -143,6 +145,64 @@ def load_undefined(path=UNDEFINED_FLAGS):
 def transfer(row, undefined):
     """Undefined flags after `row`. Flags it only may write keep their previous state."""
     return (undefined - row.written) | row.undefined
+
+
+SHIFTS = {"shl", "shr", "sar"}
+SHIFT_DEFINED = frozenset({"CF", "PF", "ZF", "SF"})
+
+
+def width(operand):
+    """Bits of a register or `ptr` memory operand of the generator; None if unknown."""
+    for bits, prefix in PTR.items():
+        if operand.startswith(prefix):
+            return bits
+    return next((bits for bits, regs in REGS.items() if operand in regs), None)
+
+
+def effect(row, item):
+    """(written, undefined) flags of `item`. They are the row's, except for `shl`, `shr`
+    and `sar` by an immediate count that, masked as the CPU masks it, is between 1 and the
+    width minus 1: then CF, PF, ZF and SF are written, OF too if the count is 1, and only
+    AF (and OF for other counts) is undefined (APM3 SAL/SHL, SHR, SAR)."""
+    if row.mnemonic in SHIFTS:
+        dest, _, count = item.lines[-1].partition(" ")[2].rpartition(", ")
+        bits = width(dest)
+        if bits and count.isdigit():
+            n = int(count) & (63 if bits == 64 else 31)
+            if 0 < n < bits:
+                if n == 1:
+                    return SHIFT_DEFINED | {"OF"}, frozenset({"AF"})
+                return SHIFT_DEFINED, frozenset({"AF", "OF"})
+    return row.written, row.undefined
+
+
+def apply(row, item, undefined):
+    """Undefined flags after `item`, an instance of `row`."""
+    written, undef = effect(row, item)
+    return (undefined - written) | undef
+
+
+def sequence_flags(items, rows):
+    """(whether every item reads only defined flags, mask at the end) of `items` run in
+    order from a fully defined state, with forward jumps joining at their targets. Items
+    may be any subset of a generated case (the reducer's candidates); a jump whose target
+    is gone lands on the next item kept, as `build.case_text` does."""
+    undefined, pending, ok = frozenset(), {}, True
+    ids = [item.id for item in items]
+    for item in items:
+        for t in [t for t in pending if t <= item.id]:
+            undefined |= pending.pop(t)
+        row = rows[item.mnemonic]
+        if row.read & undefined:
+            ok = False
+        undefined = apply(row, item, undefined)
+        if item.target is not None:
+            target = next((i for i in ids if i >= item.target), None)
+            key = target if target is not None else float("inf")
+            pending[key] = pending.get(key, frozenset()) | undefined
+    for later in pending.values():
+        undefined |= later
+    return ok, undefined
 
 
 @dataclass
@@ -477,10 +537,11 @@ class _Gen:
                 break
             lines, target, delta = got
             depth += delta
-            undefined = transfer(row, undefined)
+            item = Item(i, row.mnemonic, lines, target)
+            undefined = apply(row, item, undefined)
             if target is not None:
                 pending[target] = pending.get(target, frozenset()) | undefined
-            items.append(Item(i, row.mnemonic, lines, target))
+            items.append(item)
         undefined |= pending.pop(n, frozenset())
         return Case(self.index, gpr, rflags, fx, buf, items, undefined, self.accesses)
 

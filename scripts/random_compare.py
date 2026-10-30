@@ -5,7 +5,9 @@ informative `qemu-x86_64 discrepancias: <n>`; with `--strict`, also how many und
 flags matched. Dumps go to <out>/{native,calco,qemu}/ and the discrepancies, for the
 reducer, to <out>/discrepancies.json.
 
-    python3 scripts/random_compare.py [--n N] [--calco BIN] [--strict] [--out DIR]
+    python3 scripts/random_compare.py [--n N] [--calco BIN] [--strict] [--out DIR] [--no-qemu]
+
+`--no-qemu` skips qemu-x86_64 (scripts/mutants.py only needs calco against native).
 """
 
 import argparse
@@ -79,9 +81,10 @@ def main():
     p.add_argument("--calco", type=Path)
     p.add_argument("--strict", action="store_true")
     p.add_argument("--out", type=Path, default=common.BUILD / "random")
+    p.add_argument("--no-qemu", action="store_true")
     args = p.parse_args()
     calco = args.calco.resolve() if args.calco else common.build_calco()
-    qemu = find_qemu()
+    qemu = None if args.no_qemu else find_qemu()
 
     jobs = []
     with ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as pool:
@@ -101,7 +104,7 @@ def main():
     print(f"discrepancias: {failing}")
     if qemu:
         print(f"qemu-x86_64 discrepancias: {len({d[0] for d in qemu_found})}")
-    else:
+    elif not args.no_qemu:
         print("qemu-x86_64 discrepancias: sin qemu")
     if args.strict:
         same = sum(s[0] for _, s in results)

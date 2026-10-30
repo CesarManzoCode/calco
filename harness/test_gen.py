@@ -194,7 +194,7 @@ class Generator(unittest.TestCase):
                 row = ROWS[item.mnemonic]
                 undefined |= pending.pop(item.id, frozenset())
                 self.assertFalse(row.read & undefined, (seed, item.mnemonic, undefined))
-                undefined = (undefined - row.written) | row.undefined
+                undefined = gen.apply(row, item, undefined)
                 if item.target is not None:
                     pending[item.target] = pending.get(item.target, frozenset()) | undefined
             for later in pending.values():

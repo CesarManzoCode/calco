@@ -17,7 +17,7 @@ Fuente única de lo que calco no demuestra o no hace. Ningún otro archivo los r
 - La comparación aleatoria aplica una máscara de flags indefinidas tomada del manual; el modo estricto es solo informativo.
 - Del estado x87 no se comparan FIP, FCS, FDP, FDS ni FOP: el puntero de la última instrucción x87 apunta a la caché de código.
 - El generador aleatorio no usa AH, BH, CH ni DH como operandos explícitos (solo en la preparación de `div` de 8 bits y, implícitos, en `lahf`/`sahf`), ni `push`/`pop` de 16 bits, ni prefijos de segmento.
-- La máscara de flags es conservadora en las instrucciones con cuenta (desplazamientos, rotaciones, `shld/shrd`, cadenas con `rep`): como la cuenta puede ser 0, las flags que escriben no se dan por definidas, y las que el manual deja indefinidas en algún caso se enmascaran siempre.
+- La máscara de flags es conservadora en las instrucciones con cuenta (desplazamientos, rotaciones, `shld/shrd`, cadenas con `rep`): como la cuenta puede ser 0, las flags que escriben no se dan por definidas, y las que el manual deja indefinidas en algún caso se enmascaran siempre. La única excepción es `shl/shr/sar` con cuenta inmediata que, enmascarada como la enmascara el CPU, queda entre 1 y el ancho menos 1: ahí CF, PF, ZF y SF (y OF si la cuenta es 1) se dan por definidas; con cuenta en CL se sigue enmascarando todo.
 - RDTSC, RDTSCP, RDRAND, RCPPS, RCPSS, RSQRTPS, RSQRTSS y CPUID quedan fuera del generador aleatorio; solo se comprueba que corren sin error.
 
 ## Sistema

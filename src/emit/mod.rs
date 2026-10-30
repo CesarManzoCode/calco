@@ -421,6 +421,16 @@ impl Asm {
     /// Re-encodes `insn` from its fields, with the memory operand written as `rw` says.
     /// Fails, emitting nothing, only for `RipTarget` out of rel32 range.
     pub fn recode(&mut self, insn: &Insn, rw: MemRewrite) -> Result<(), OutOfRange> {
+        // Injected faults of the harness (contract 4.6), off by default.
+        #[cfg(feature = "mutant-fadd-fsub")]
+        let insn = &Insn {
+            modrm: insn.modrm.map(|m| {
+                m | 0x20
+                    * (insn.map == Map::OneByte && insn.opcode & 0xfb == 0xd8 && m & 0x38 == 0)
+                        as u8
+            }),
+            ..*insn
+        };
         let moffs = is_moffs(insn);
         let base_rw = matches!(rw, MemRewrite::Base(_));
         let mut prefixes = [0u8; MAX_LEN];
@@ -452,6 +462,14 @@ impl Asm {
                 (rex, opcode)
             }
             _ => (insn.rex, insn.opcode),
+        };
+        #[cfg(feature = "mutant-adc-carry")]
+        let opcode = opcode - 0x10 * (insn.map == Map::OneByte && opcode & 0xf8 == 0x10) as u8;
+        #[cfg(feature = "mutant-movsxd")]
+        let (rex, opcode) = if insn.map == Map::OneByte && opcode == 0x63 {
+            (rex & !REX_W, 0x8b)
+        } else {
+            (rex, opcode)
         };
         let rip_disp = match rw {
             MemRewrite::RipTarget(target) => {
@@ -491,6 +509,17 @@ impl Asm {
             }
         }
         self.le(insn.imm, insn.imm_size as usize);
+        #[cfg(feature = "mutant-pshufd-imm")]
+        if insn.map == Map::Map0F && insn.opcode == 0x70 && insn.mandatory == 0x66 {
+            *self.buf.last_mut().unwrap() ^= 1;
+        }
+        #[cfg(feature = "mutant-shift-flags")]
+        if insn.map == Map::OneByte
+            && insn.opcode | 0x13 == 0xd3
+            && insn.modrm.is_some_and(|m| m & 0x38 >= 0x20)
+        {
+            self.byte(0xf5);
+        }
         Ok(())
     }
 }

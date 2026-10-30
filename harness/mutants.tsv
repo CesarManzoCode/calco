@@ -1,0 +1,7 @@
+feature	description
+mutant-adc-carry	ADC (10–15) se emite como ADD (00–05): se pierde el acarreo de entrada
+mutant-shift-flags	tras SHL/SHR/SAR se emite cmc: CF queda invertido
+mutant-movsxd	MOVSXD se emite como MOV de 32 bits: el resultado se extiende con ceros
+mutant-riprel-disp	el destino de todo operando RIP-relativo se desplaza +1
+mutant-pshufd-imm	el inmediato de PSHUFD se emite con el bit 0 invertido
+mutant-fadd-fsub	FADD (D8 /0, DC /0) se emite como FSUB (/4)

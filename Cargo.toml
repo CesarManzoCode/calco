@@ -7,6 +7,15 @@ description = "Dynamic binary translator from x86-64 to x86-64 for Linux user-mo
 
 [dependencies]
 
+# Injected faults of the harness (contract 4.6); harness/mutants.tsv describes them.
+[features]
+mutant-adc-carry = []
+mutant-shift-flags = []
+mutant-movsxd = []
+mutant-riprel-disp = []
+mutant-pshufd-imm = []
+mutant-fadd-fsub = []
+
 [profile.release]
 panic = "abort"
 debug = 1

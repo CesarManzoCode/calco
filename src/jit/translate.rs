@@ -495,6 +495,8 @@ impl Tr<'_> {
 /// Address of a RIP-relative operand; with `67` the address is 32 bits.
 fn rip_target(insn: &Insn) -> u64 {
     let target = insn.rip_target().expect("not RIP-relative");
+    #[cfg(feature = "mutant-riprel-disp")]
+    let target = target.wrapping_add(1);
     if insn.has_prefix(PREFIX_ADDR32) {
         target & 0xffff_ffff
     } else {
