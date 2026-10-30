@@ -354,6 +354,15 @@ pub fn thread(cpu: &mut Cpu) -> &'static Thread {
     unsafe { &*(cpu.signal_state as *const Thread) }
 }
 
+/// Signal state of a new thread of `clone`: the guest mask of its parent, nothing pending
+/// and no alternate stack (clone(2)); then calco's alternate stack and the host mask that
+/// mirrors the guest one. The thread comes with every host signal blocked.
+pub fn spawned(cpu: &mut Cpu, mask: u64) {
+    cpu.signal_state = Box::into_raw(Box::new(Thread::new(mask))).cast();
+    init_thread(cpu);
+    host::set_host_mask(host_mask(thread(cpu).mask()));
+}
+
 /// The child of a `fork`: no pending signals, no interrupted call (signal(7)).
 pub fn forked(cpu: &mut Cpu) {
     let th = thread(cpu);
@@ -827,18 +836,25 @@ pub fn sigpending(cpu: &mut Cpu, mem: &Mem, set: u64, size: u64) -> i64 {
     }
 }
 
-/// `rt_sigsuspend`: waits with the guest mask `set` in the host `rt_sigsuspend` (safe, so a
-/// signal already queued ends it at once). The old mask goes in the frame of the signal
-/// that ends it, and comes back afterwards. Always `-EINTR`: a signal that the new mask
-/// lets through is what ends the wait, also when it came before the host call.
-pub fn sigsuspend(cpu: &mut Cpu, mem: &Mem, set: u64, size: u64) -> i64 {
+/// The guest `sigset_t` at `set` of a call that takes it with its size (8).
+pub fn read_set(mem: &Mem, set: u64, size: u64) -> Result<u64, i64> {
     if size != 8 {
-        return err(EINVAL);
+        return Err(err(EINVAL));
     }
-    let s = match read_u64(mem, set) {
-        Ok(s) => s,
-        Err(e) => return err(e),
-    };
+    read_u64(mem, set).map_err(err)
+}
+
+/// `rt_sigsuspend`.
+pub fn sigsuspend(cpu: &mut Cpu, mem: &Mem, set: u64, size: u64) -> i64 {
+    read_set(mem, set, size).map_or_else(|e| e, |s| suspend(cpu, s))
+}
+
+/// `rt_sigsuspend` with the set already read: waits with the guest mask `s` in the host
+/// `rt_sigsuspend` (safe, so a signal already queued ends it at once). The old mask goes in
+/// the frame of the signal that ends it, and comes back afterwards. Always `-EINTR`: a
+/// signal that the new mask lets through is what ends the wait, also when it came before
+/// the host call. Takes no lock: other threads go on meanwhile.
+pub fn suspend(cpu: &mut Cpu, s: u64) -> i64 {
     let th = thread(cpu);
     th.saved_mask.set(Some(th.mask()));
     th.set_mask_quiet(cpu, s);
@@ -850,31 +866,57 @@ pub fn sigsuspend(cpu: &mut Cpu, mem: &Mem, set: u64, size: u64) -> i64 {
     -(EINTR as i64)
 }
 
+/// The first step of `rt_sigtimedwait`: finished at once, or the host set to wait for.
+pub enum TimedWait {
+    Done(i64),
+    Host(u64),
+}
+
 /// `rt_sigtimedwait`: a signal of `set` queued by calco first, then the host call.
 pub fn sigtimedwait(cpu: &mut Cpu, mem: &Mem, a: [u64; 6]) -> i64 {
-    let [set, info, timeout, size, ..] = a;
-    if size != 8 {
-        return err(EINVAL);
+    match timedwait_queued(cpu, mem, a) {
+        TimedWait::Done(ret) => ret,
+        TimedWait::Host(host) => {
+            let ret = timedwait_host(host, a);
+            timedwait_info(mem, a, ret)
+        }
     }
-    let s = match read_u64(mem, set) {
+}
+
+/// Reads the guest set and takes a signal of it that calco already queued.
+pub fn timedwait_queued(cpu: &mut Cpu, mem: &Mem, a: [u64; 6]) -> TimedWait {
+    let [set, info, _, size, ..] = a;
+    let s = match read_set(mem, set, size) {
         Ok(s) => s & !UNBLOCKABLE,
-        Err(e) => return err(e),
+        Err(e) => return TimedWait::Done(e),
     };
     let th = thread(cpu);
     if let Some((sig, sinfo)) = th.take(cpu, s) {
         if info != 0
             && let Err(e) = write_bytes(mem, info, &sinfo.0)
         {
-            return err(e);
+            return TimedWait::Done(err(e));
         }
-        return sig as i64;
+        return TimedWait::Done(sig as i64);
     }
-    let host = host_set(s);
+    TimedWait::Host(host_set(s))
+}
+
+/// The host `rt_sigtimedwait` on the host set `host`; takes no lock, so other threads go
+/// on meanwhile.
+pub fn timedwait_host(host: u64, a: [u64; 6]) -> i64 {
+    let [_, info, timeout, ..] = a;
     let args = [&host as *const u64 as u64, info, timeout, 8, 0, 0];
-    let ret = safe_syscall(sys::SYS_RT_SIGTIMEDWAIT as u64, args);
+    safe_syscall(sys::SYS_RT_SIGTIMEDWAIT as u64, args)
+}
+
+/// The result of the host call `ret` as the guest sees it: its signal number, in the
+/// return value and in the `siginfo_t`.
+pub fn timedwait_info(mem: &Mem, a: [u64; 6], ret: i64) -> i64 {
     if ret <= 0 {
         return ret;
     }
+    let info = a[1];
     let sig = ret as u32;
     if info != 0
         && let Ok(raw) = read_bytes(mem, info, SIGINFO_SIZE as u64)

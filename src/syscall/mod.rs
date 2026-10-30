@@ -4,32 +4,42 @@
 //! `mem.rs` without `PROT_EXEC`, and anything off the list returns `-ENOSYS`.
 //!
 //! `execve` runs calco again on the new program; `fork`, `vfork` and `clone` without
-//! `CLONE_VM` fork the host process, and the child goes on in the dispatcher.
+//! `CLONE_VM` fork the host process, and the child goes on in the dispatcher. `clone` with
+//! `CLONE_VM|CLONE_THREAD` starts a guest thread (`thread.rs`); `exit` of a thread is served
+//! by the dispatcher.
 //!
 //! Every call that reaches the kernel goes through the safe system call of `signal/`, so
 //! a guest signal that arrives before the `syscall` skips it and the call runs again after
 //! the signal, or ends with `EINTR`, as `SA_RESTART` says (contract 3.11). The signal
-//! calls themselves are in `signal/`. `clone` with `CLONE_VM` (k2-03) returns `-ENOSYS`
-//! until then.
+//! calls themselves are in `signal/`.
+//!
+//! With threads (contract 3.12), `handle` serves the emulated calls with the process lock
+//! held, except the ones that wait (`wait4`, `waitid`, `rt_sigsuspend`,
+//! `rt_sigtimedwait`): they take it only to read or write guest memory, since the thread
+//! they wait for may need it. Pass-through calls take no lock.
 
 mod table;
 
-pub use self::table::{Kind, classify};
+pub use self::table::{EXIT, Kind, classify};
 
 use std::ffi::OsStr;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use self::table::*;
 use crate::cpu::{Cpu, R8, R9, R10, R11, RAX, RCX, RDI, RDX, RSI, RSP};
 use crate::loader;
 use crate::mem::{Mem, USER_END, host_prot};
-use crate::signal::{self, guest_signal, host_signal};
+use crate::signal::{self, TimedWait, guest_signal, host_signal};
 use crate::sys::{
     self, AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, E2BIG, EFAULT, EINVAL, ELOOP, ENAMETOOLONG,
     ENOSYS, EPERM, MAP_ANONYMOUS, PROT_EXEC, PROT_READ, PROT_WRITE,
+};
+use crate::thread::{
+    self, CLONE_CHILD_CLEARTID, CLONE_SETTLS, CLONE_VM, CSIGNAL, CloneKind, Member,
 };
 
 // /usr/include/asm/prctl.h
@@ -47,11 +57,6 @@ const ROBUST_LIST_HEAD_SIZE: u64 = 24;
 const PATH_MAX: u64 = 4096;
 /// Longest argument or environment string `execve` takes (`MAX_ARG_STRLEN`).
 const MAX_ARG_STRLEN: u64 = 32 * 4096;
-// /usr/include/linux/sched.h
-const CSIGNAL: u64 = 0xff;
-const CLONE_VM: u64 = 0x100;
-const CLONE_SETTLS: u64 = 0x80000;
-const CLONE_CHILD_CLEARTID: u64 = 0x200000;
 const SIGCHLD: u64 = 17;
 // /usr/include/asm-generic/siginfo.h: `si_code` of SIGCHLD whose `si_status` is a signal.
 const CLD_KILLED: i32 = 2;
@@ -67,7 +72,7 @@ const MADV_DONTNEED: u64 = 4;
 const F_GETFD: u64 = 1;
 const FCNTL: u64 = 72;
 
-/// Process state the emulated calls keep.
+/// Process state the emulated calls keep, shared by the guest threads.
 pub struct State {
     /// Absolute path of the guest program, what `/proc/self/exe` reads as.
     exe: Vec<u8>,
@@ -77,6 +82,7 @@ pub struct State {
     log: Option<PathBuf>,
     /// Guest signal actions.
     pub signals: signal::Process,
+    /// The last `set_robust_list` of any thread.
     pub robust_list: (u64, u64),
     /// Set when guest code may have been unmapped, replaced or lost execute permission.
     code_changed: bool,
@@ -312,6 +318,7 @@ impl State {
             }
             // glibc turns rseq off and falls back from clone3 to clone.
             RSEQ | CLONE3 => err(ENOSYS),
+            // The dispatcher serves the `exit` of a guest thread before it gets here.
             EXIT | EXIT_GROUP => pass(nr, a),
             RT_SIGACTION => self.signals.sigaction(cpu, mem, a),
             RT_SIGPROCMASK => signal::sigprocmask(cpu, mem, a[0], a[1], a[2], a[3]),
@@ -332,36 +339,21 @@ impl State {
             },
             READLINK => self.readlink(mem, nr, a, a[0], a[1], a[2]),
             READLINKAT => self.readlink(mem, nr, a, a[1], a[2], a[3]),
-            // Threads come with k2-03.
-            CLONE if a[0] & CLONE_VM != 0 => self.unsupported(cpu, nr),
-            CLONE => fork(cpu, a[0], a[1], a[2], a[3], a[4]),
+            CLONE => match thread::clone_kind(a[0]) {
+                // vfork as fork (contract 3.10): the child gets a copy of the memory.
+                Ok(CloneKind::Fork) => fork(cpu, a[0] & !CLONE_VM, a[1], a[2], a[3], a[4]),
+                Ok(CloneKind::Thread) => thread::clone(cpu, mem, a),
+                Err(e) => err(e),
+            },
             FORK | VFORK => fork(cpu, SIGCHLD, 0, 0, 0, 0),
             EXECVE => match read_string(mem, a[0], PATH_MAX, ENAMETOOLONG) {
                 Ok(path) => self.execve(mem, path, a[1], a[2]),
                 Err(e) => err(e),
             },
             EXECVEAT => self.execveat(mem, a),
-            WAIT4 => {
+            WAIT4 | WAITID => {
                 let ret = pass(nr, a);
-                if ret > 0
-                    && a[1] != 0
-                    && let Ok(status) = read_u32(mem, a[1])
-                {
-                    let _ = write_u32(mem, a[1], guest_wait_status(status));
-                }
-                ret
-            }
-            WAITID => {
-                let ret = pass(nr, a);
-                let (code, status) = (a[2].wrapping_add(SI_CODE), a[2].wrapping_add(SI_STATUS));
-                if ret == 0
-                    && a[2] != 0
-                    && let (Ok(c), Ok(st)) = (read_u32(mem, code), read_u32(mem, status))
-                {
-                    let st = guest_waitid_status(c as i32, st as i32);
-                    let _ = write_u32(mem, status, st as u32);
-                }
-                ret
+                wait_result(mem, nr, a, ret)
             }
             MADVISE => {
                 let ret = pass(nr, a);
@@ -498,6 +490,29 @@ impl State {
     }
 }
 
+/// `wait4` and `waitid` once the kernel answered `ret`: the signal of the status as the
+/// guest numbers it.
+fn wait_result(mem: &Mem, nr: u64, a: [u64; 6], ret: i64) -> i64 {
+    if nr == WAIT4 {
+        if ret > 0
+            && a[1] != 0
+            && let Ok(status) = read_u32(mem, a[1])
+        {
+            let _ = write_u32(mem, a[1], guest_wait_status(status));
+        }
+        return ret;
+    }
+    let (code, status) = (a[2].wrapping_add(SI_CODE), a[2].wrapping_add(SI_STATUS));
+    if ret == 0
+        && a[2] != 0
+        && let (Ok(c), Ok(st)) = (read_u32(mem, code), read_u32(mem, status))
+    {
+        let st = guest_waitid_status(c as i32, st as i32);
+        let _ = write_u32(mem, status, st as u32);
+    }
+    ret
+}
+
 /// `fork`, `vfork` and `clone` without `CLONE_VM`: the host process forks and the child
 /// goes on in the dispatcher with `rax = 0`. The child's stack and TLS are guest state, so
 /// they go to its `Cpu` instead of to the host; the exit signal is translated.
@@ -544,22 +559,77 @@ fn arch_prctl(cpu: &mut Cpu, mem: &Mem, code: u64, addr: u64) -> i64 {
     }
 }
 
-/// Serves the `syscall` the guest just executed; `cpu.rip` is already past it.
-pub fn handle(cpu: &mut Cpu, mem: &mut Mem, state: &mut State) {
+/// Serves the `syscall` the guest thread of `cpu` (`me` in the thread list) just executed;
+/// `cpu.rip` is already past it.
+pub fn handle(cpu: &mut Cpu, me: &Arc<Member>) {
+    let shared = thread::shared();
     let nr = cpu.gpr[RAX];
     if nr == RT_SIGRETURN {
         // The whole state comes from the frame, RCX and R11 included.
-        state.signals.sigreturn(cpu, mem);
+        let mut world = shared.world();
+        let world = &mut *world;
+        world.state.signals.sigreturn(cpu, &world.mem);
         return;
     }
     let args = [RDI, RSI, RDX, R10, R8, R9].map(|r| cpu.gpr[r]);
-    let ret = state.dispatch(cpu, mem, nr, args);
+    // The guard of a `let` goes at the end of its statement: the waits hold no lock.
+    let ret = match (classify(nr), nr) {
+        (Kind::Pass, _) => pass(nr, args),
+        (_, WAIT4 | WAITID) => {
+            let ret = pass(nr, args);
+            wait_result(&shared.world().mem, nr, args, ret)
+        }
+        (_, RT_SIGSUSPEND) => {
+            let set = signal::read_set(&shared.world().mem, args[0], args[1]);
+            set.map_or_else(|e| e, |s| signal::suspend(cpu, s))
+        }
+        (_, RT_SIGTIMEDWAIT) => {
+            let first = signal::timedwait_queued(cpu, &shared.world().mem, args);
+            match first {
+                TimedWait::Done(ret) => ret,
+                TimedWait::Host(host) => {
+                    let ret = signal::timedwait_host(host, args);
+                    signal::timedwait_info(&shared.world().mem, args, ret)
+                }
+            }
+        }
+        _ => locked(cpu, me, nr, args),
+    };
     // An interrupted call waits for `signal::deliver` to restart it or leave EINTR.
     let ret = signal::note_result(cpu, nr, ret);
     cpu.gpr[RAX] = ret as u64;
     // What the `syscall` instruction leaves: the return address in RCX, RFLAGS in R11.
     cpu.gpr[RCX] = cpu.rip;
     cpu.gpr[R11] = cpu.rflags;
+}
+
+/// An emulated call served with the process lock held. A call that may change guest code
+/// takes the cache lock first and empties the cache before letting it go, so no thread
+/// runs a translation of code that is gone; `fork` takes the cache lock and the thread list
+/// too, so the child finds every lock of calco free.
+fn locked(cpu: &mut Cpu, me: &Arc<Member>, nr: u64, a: [u64; 6]) -> i64 {
+    let shared = thread::shared();
+    let forks = matches!(nr, FORK | VFORK)
+        || (nr == CLONE && thread::clone_kind(a[0]) == Ok(CloneKind::Fork));
+    let changes_code = matches!(nr, MUNMAP | MPROTECT | MREMAP | MADVISE)
+        || (nr == MMAP && a[3] & sys::MAP_FIXED as u64 != 0);
+    let jit = (forks || changes_code).then(|| shared.jit());
+    let mut world = shared.world();
+    let mut threads = forks.then(|| shared.threads());
+    let w = &mut *world;
+    let ret = w.state.dispatch(cpu, &mut w.mem, nr, a);
+    let changed = w.state.take_code_changed();
+    if ret == 0
+        && let Some(threads) = threads.as_mut()
+    {
+        thread::forked(threads, me);
+    }
+    drop(threads);
+    drop(world);
+    if changed {
+        jit.unwrap_or_else(|| shared.jit()).flush();
+    }
+    ret
 }
 
 #[cfg(test)]

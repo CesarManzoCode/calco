@@ -28,6 +28,7 @@ pub const SYS_RT_SIGQUEUEINFO: usize = 129;
 pub const SYS_RT_SIGSUSPEND: usize = 130;
 pub const SYS_SIGALTSTACK: usize = 131;
 pub const SYS_GETTID: usize = 186;
+pub const SYS_FUTEX: usize = 202;
 pub const SYS_EXIT_GROUP: usize = 231;
 pub const SYS_TGKILL: usize = 234;
 pub const SYS_GETRANDOM: usize = 318;
@@ -60,6 +61,7 @@ pub const EINTR: i32 = 4;
 pub const E2BIG: i32 = 7;
 pub const ENOEXEC: i32 = 8;
 pub const EBADF: i32 = 9;
+pub const EAGAIN: i32 = 11;
 pub const ENOMEM: i32 = 12;
 pub const EACCES: i32 = 13;
 pub const EFAULT: i32 = 14;
@@ -77,6 +79,9 @@ pub const AT_EACCESS: usize = 0x200;
 pub const AT_EMPTY_PATH: u64 = 0x1000;
 // /usr/include/unistd.h
 pub const X_OK: usize = 1;
+
+// /usr/include/linux/futex.h
+const FUTEX_WAKE: usize = 1;
 
 // /usr/include/asm-generic/signal-defs.h
 const SIG_DFL: usize = 0;
@@ -374,6 +379,27 @@ pub fn sigaltstack(sp: u64, size: u64) -> Result<(), i32> {
     // stack_t: ss_sp, ss_flags (int, padded), ss_size.
     let ss: [u64; 3] = [sp, 0, size];
     check(unsafe { syscall2(SYS_SIGALTSTACK, ss.as_ptr() as usize, 0) }).map(|_| ())
+}
+
+pub fn gettid() -> u64 {
+    unsafe { syscall0(SYS_GETTID) as u64 }
+}
+
+/// Sends host signal `sig` to thread `tid` of this process.
+pub fn tgkill(tid: u64, sig: u32) -> Result<(), i32> {
+    let pid = unsafe { syscall0(SYS_GETPID) as usize };
+    check(unsafe { syscall3(SYS_TGKILL, pid, tid as usize, sig as usize) }).map(|_| ())
+}
+
+/// `futex(FUTEX_WAKE)`: wakes up to `n` waiters on the word at `addr`.
+pub fn futex_wake(addr: u64, n: u32) {
+    unsafe { syscall3(SYS_FUTEX, addr as usize, FUTEX_WAKE, n as usize) };
+}
+
+/// Ends this thread alone (`exit`) with `code`; the process goes on while others run.
+pub fn exit_thread(code: u64) -> ! {
+    unsafe { syscall1(SYS_EXIT, code as usize) };
+    unreachable!("exit returned")
 }
 
 /// Sends host signal `sig` to this thread.

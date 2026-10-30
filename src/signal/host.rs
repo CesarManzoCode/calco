@@ -19,10 +19,12 @@
 //!   dispatcher; in the middle of an expansion, TF steps host instructions up to the next
 //!   boundary (or, if the TF probe failed at start, the block is unlinked and leaves to
 //!   the dispatcher at its end); in Rust, the dispatcher sees `Cpu.pending_signals`.
+//! - Host signal 62 while a thread empties the code cache (contract 3.12): a thread in
+//!   translated code goes back to the dispatcher the same way, with nothing queued.
 
 use core::arch::naked_asm;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use super::frame::{
     self, FCW_INIT, FP_CWD, FP_MXCSR, FP_SIZE, FP_SW_RESERVED, FP_SWD, FP_TWD, FP_XFEATURES,
@@ -37,11 +39,9 @@ use super::{
 };
 use crate::cpu::{Cpu, OFF_HOST_FS, OFF_PENDING_SIGNALS, RAX, RSP};
 use crate::jit::translate::EXIT_INTERRUPTED;
-use crate::jit::{Block, Jit, trampoline};
+use crate::jit::{Block, trampoline};
 use crate::sys::{self, KernelSigaction, MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 
-/// The code cache, for the handler to find the block of a pc.
-static JIT: AtomicPtr<Jit> = AtomicPtr::new(ptr::null_mut());
 /// Result of the TF probe: the kernel honours TF set in a `ucontext`.
 static TF_WORKS: AtomicBool = AtomicBool::new(false);
 static PROBE: AtomicU32 = AtomicU32::new(PROBE_IDLE);
@@ -64,8 +64,7 @@ unsafe extern "C" {
 
 /// Sets up signals for the main thread: inherited mask and ignored signals become the
 /// guest's, the synchronous signals and calco's 62 get the handler, and TF is probed.
-pub fn init(cpu: &mut Cpu, process: &mut Process, jit: &mut Jit) {
-    JIT.store(jit, Ordering::Release);
+pub fn init(cpu: &mut Cpu, process: &mut Process) {
     // What execve keeps from the program before: the mask and the ignored signals.
     let inherited = sys::rt_sigprocmask(super::SIG_BLOCK as usize, None).unwrap_or(0);
     for sig in 1..=GUEST_SIGNALS as u32 {
@@ -283,7 +282,7 @@ unsafe extern "sysv64" fn on_signal(sig: i32, info: *const u8, uc: *mut u8, fs: 
             return step(cpu, th, uc, pc, fs);
         }
         if sig == HOST_KICK {
-            return fs;
+            return kick(cpu, th, uc, pc, fs);
         }
         if sync_fault(sig, info) {
             return fault(cpu, th, sig, info, uc, pc);
@@ -293,15 +292,9 @@ unsafe extern "sysv64" fn on_signal(sig: i32, info: *const u8, uc: *mut u8, fs: 
 }
 
 /// The block whose host code holds `pc`, its id and the offset of `pc` in it.
+/// Only a thread in the cache asks with a pc inside it, and no flush ends while it is there.
 unsafe fn locate(pc: u64) -> Option<(u32, &'static Block, u32)> {
-    let jit = JIT.load(Ordering::Acquire);
-    if jit.is_null() {
-        return None;
-    }
-    // The thread is in translated code, so the dispatcher is not changing the cache.
-    let jit = unsafe { &*jit };
-    let id = jit.block_at(pc)?;
-    let block = jit.block(id);
+    let (id, block) = crate::thread::index()?.block_at(pc)?;
     Some((id, block, (pc - block.host) as u32))
 }
 
@@ -375,6 +368,34 @@ unsafe fn async_signal(
         }
         return fs;
     }
+    unsafe { to_dispatcher(cpu, th, uc, pc, fs, true) }
+}
+
+/// Host signal 62 from a thread that empties the code cache (contract 3.12): if the thread
+/// is in translated code it goes back to the dispatcher, where it waits for the flush to
+/// end. The flushing thread kicks again until every thread is out, so a kick that finds
+/// the thread elsewhere, or in an expansion without TF, is just dropped.
+unsafe fn kick(cpu: *mut Cpu, th: &Thread, uc: *mut u8, pc: u64, fs: u64) -> u64 {
+    if !crate::thread::flushing() {
+        return fs;
+    }
+    unsafe { to_dispatcher(cpu, th, uc, pc, fs, false) }
+}
+
+/// Brings a thread at `pc` back to the dispatcher with the exact guest state in `Cpu`: at
+/// once in `enter` before its jump or at a guest boundary of a block; from the middle of an
+/// expansion, by stepping with TF to the next boundary. Without TF and with `unlink`, the
+/// exits of the block go back to their stubs so it leaves at its end, if the cache lock is
+/// free (otherwise the thread sees its signal at its next exit). Anywhere else (Rust, the
+/// way out of the cache) the dispatcher comes next anyway.
+unsafe fn to_dispatcher(
+    cpu: *mut Cpu,
+    th: &Thread,
+    uc: *mut u8,
+    pc: u64,
+    fs: u64,
+    unlink: bool,
+) -> u64 {
     let enter = (
         &raw const calco_enter_committed as u64,
         &raw const calco_enter_jump as u64,
@@ -397,9 +418,9 @@ unsafe fn async_signal(
     if TF_WORKS.load(Ordering::Relaxed) {
         unsafe { set(uc, UC_EFLAGS, get(uc, UC_EFLAGS) | TF) };
         th.stepping.store(true, Ordering::Relaxed);
-    } else {
+    } else if unlink && let Some(mut jit) = crate::thread::try_jit() {
         // Without TF the block runs to its end and leaves to the dispatcher.
-        unsafe { (*JIT.load(Ordering::Acquire)).unlink_outgoing(id) };
+        jit.unlink_outgoing(id);
     }
     fs
 }

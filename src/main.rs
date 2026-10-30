@@ -13,6 +13,7 @@ mod mem;
 mod signal;
 mod sys;
 mod syscall;
+mod thread;
 
 use std::env;
 use std::ffi::OsString;
@@ -89,8 +90,8 @@ fn main() {
     let execfn = program.as_os_str().as_bytes();
     let loaded = loader::load(&image, execfn, &mut mem, &argv, &envp, cpuid::hwcap())
         .unwrap_or_else(|e| fail(&e));
-    let mut cpu = cpu::Cpu::new(loaded.entry, loaded.rsp);
-    let mut jit = jit::Jit::new(&mem).unwrap_or_else(|e| {
+    let cpu = cpu::Cpu::new(loaded.entry, loaded.rsp);
+    let jit = jit::Jit::new(&mem).unwrap_or_else(|e| {
         fail(&format!(
             "cannot open the code cache: {}",
             std::io::Error::from_raw_os_error(e)
@@ -104,10 +105,10 @@ fn main() {
     let log = env::var_os("CALCO_LOG")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
-    let mut state = syscall::State::new(
+    let state = syscall::State::new(
         exe.into_os_string().into_vec(),
         calco.into_os_string().into_vec(),
         log,
     );
-    jit::run(&mut cpu, &mut mem, &mut jit, &mut state)
+    thread::run_main(cpu, mem, jit, state)
 }

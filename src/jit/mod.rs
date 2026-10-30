@@ -1,23 +1,35 @@
-//! Code cache, chaining and dispatcher (contract 3.5–3.8).
+//! Code cache, chaining and dispatcher (contract 3.5–3.8, 3.12).
 //!
 //! The cache is a 256 MiB arena at the address `mem.rs` reserved (contract 3.1). It starts
 //! with the exit thunk and the shared indirect exit; blocks follow, 16-byte aligned, until
 //! it fills up and is emptied whole. Chainable exits are patched in place to jump to the
-//! translation of their target, and each block keeps the exits that jump into it.
+//! translation of their target, and the cache keeps, for each block, the exits that jump
+//! into it.
+//!
+//! Every guest thread runs `run` and shares the cache (contract 3.12): translating,
+//! patching and invalidating happen under the `Mutex<Jit>` of `thread::Shared`. The lookup
+//! table and the block list are published with atomic stores (`Index`) and read without
+//! the lock, by the dispatcher and by the signal handler. A thread only uses what it read
+//! there while `thread::enter_cache` marks it in the cache; emptying the cache waits for
+//! every other thread to be out of it (`thread::safe_point`).
 
 pub mod trampoline;
 pub mod translate;
 
 use core::ops::Range;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::ptr;
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::alloc::{Layout, alloc_zeroed, handle_alloc_error};
+use std::sync::Arc;
 
-use crate::cpu::{Cpu, OFF_EXIT_REASON};
+use crate::cpu::{Cpu, OFF_EXIT_REASON, RAX, RDI};
 use crate::cpuid;
 use crate::emit::{self, Asm};
 use crate::mem::{CODE_CACHE_SIZE, Mem};
 use crate::signal;
 use crate::sys::{self, EINVAL, PROT_EXEC, PROT_READ, PROT_WRITE};
 use crate::syscall;
+use crate::thread::{self, Member};
 
 use self::translate::{
     EXIT_BRANCH, EXIT_CPUID, EXIT_INDIRECT, EXIT_INTERRUPTED, EXIT_SIGNAL, EXIT_SYSCALL, Env,
@@ -27,8 +39,14 @@ use self::translate::{
 /// Space kept free after the start area: the exit thunk and the indirect exit.
 const START_AREA: u64 = 64;
 const BLOCK_ALIGN: u64 = 16;
+/// Buckets of the lookup table, a power of two. The table never grows, so readers never
+/// see it move: the cache is emptied before half of the buckets are in use.
+const MAP_SLOTS: usize = 1 << 20;
+/// Most blocks of a generation. The block list is allocated once with this capacity and
+/// never reallocates.
+const MAX_BLOCKS: usize = MAP_SLOTS / 2;
 
-/// A translated block in the cache.
+/// A translated block in the cache. Never changed once published.
 pub struct Block {
     pub rip: u64,
     pub guest_end: u64,
@@ -39,8 +57,6 @@ pub struct Block {
     pub pcs: Vec<PcEntry>,
     /// Ids of the block's own chainable exits.
     pub exits: Range<u32>,
-    /// Ids of the exits of any block that are chained to this one.
-    pub incoming: Vec<u32>,
 }
 
 /// A chainable exit of a block.
@@ -54,65 +70,143 @@ pub struct Exit {
     pub linked: bool,
 }
 
-/// Open-addressing hash table `guest rip → block index`. Rip 0 marks a free slot: page 0
-/// is never guest code (`mmap_min_addr`).
-struct BlockMap {
-    slots: Vec<(u64, u32)>,
-    len: usize,
+#[repr(C)]
+struct Bucket {
+    rip: AtomicU64,
+    block: AtomicU32,
+}
+
+/// Open-addressing hash table `guest rip → block index`, of fixed size, read without the
+/// cache lock. Rip 0 marks a free bucket: page 0 is never guest code (`mmap_min_addr`). The
+/// writer (with the lock) stores the block before the rip, the rip with release; a reader
+/// that sees the rip with acquire sees the block. Entries only go all at once, in `clear`.
+pub struct BlockMap {
+    buckets: Box<[Bucket]>,
+    len: AtomicUsize,
 }
 
 impl BlockMap {
-    const INITIAL: usize = 1 << 14;
-
-    fn new() -> BlockMap {
+    pub fn new() -> BlockMap {
+        let layout = Layout::array::<Bucket>(MAP_SLOTS).expect("lookup table size");
+        // All-zero buckets are free ones; zeroed pages come lazily from the kernel.
+        let buckets = unsafe {
+            let p = alloc_zeroed(layout) as *mut Bucket;
+            if p.is_null() {
+                handle_alloc_error(layout);
+            }
+            Box::from_raw(ptr::slice_from_raw_parts_mut(p, MAP_SLOTS))
+        };
         BlockMap {
-            slots: vec![(0, 0); Self::INITIAL],
-            len: 0,
+            buckets,
+            len: AtomicUsize::new(0),
         }
     }
 
     fn slot(&self, rip: u64) -> usize {
-        let bits = self.slots.len().trailing_zeros();
+        let bits = MAP_SLOTS.trailing_zeros();
         (rip.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - bits)) as usize
     }
 
-    fn get(&self, rip: u64) -> Option<u32> {
-        let mask = self.slots.len() - 1;
+    pub fn len(&self) -> usize {
+        self.len.load(Ordering::Relaxed)
+    }
+
+    pub fn get(&self, rip: u64) -> Option<u32> {
         let mut i = self.slot(rip);
         loop {
-            match self.slots[i] {
-                (0, _) => return None,
-                (r, block) if r == rip => return Some(block),
-                _ => i = (i + 1) & mask,
+            let b = &self.buckets[i];
+            match b.rip.load(Ordering::Acquire) {
+                0 => return None,
+                r if r == rip => return Some(b.block.load(Ordering::Relaxed)),
+                _ => i = (i + 1) & (MAP_SLOTS - 1),
             }
         }
     }
 
-    fn insert(&mut self, rip: u64, block: u32) {
-        if 2 * (self.len + 1) > self.slots.len() {
-            let grown = vec![(0, 0); 2 * self.slots.len()];
-            let old = std::mem::replace(&mut self.slots, grown);
-            self.len = 0;
-            for (r, b) in old {
-                if r != 0 {
-                    self.insert(r, b);
-                }
-            }
-        }
-        let mask = self.slots.len() - 1;
+    /// Only with the cache lock held and fewer than half of the buckets in use.
+    pub fn insert(&self, rip: u64, block: u32) {
         let mut i = self.slot(rip);
-        while self.slots[i].0 != 0 && self.slots[i].0 != rip {
-            i = (i + 1) & mask;
+        loop {
+            let b = &self.buckets[i];
+            match b.rip.load(Ordering::Relaxed) {
+                0 => {
+                    b.block.store(block, Ordering::Relaxed);
+                    b.rip.store(rip, Ordering::Release);
+                    self.len.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                r if r == rip => {
+                    b.block.store(block, Ordering::Release);
+                    return;
+                }
+                _ => i = (i + 1) & (MAP_SLOTS - 1),
+            }
         }
-        if self.slots[i].0 == 0 {
-            self.len += 1;
-        }
-        self.slots[i] = (rip, block);
     }
 
-    fn clear(&mut self) {
-        self.slots.iter_mut().for_each(|s| *s = (0, 0));
-        self.len = 0;
+    /// Only at a safe point, when no thread reads the table. Buckets that are already free
+    /// are not written, so pages never used stay untouched.
+    pub fn clear(&self) {
+        for b in self.buckets.iter() {
+            if b.rip.load(Ordering::Relaxed) != 0 {
+                b.rip.store(0, Ordering::Relaxed);
+                b.block.store(0, Ordering::Relaxed);
+            }
+        }
+        self.len.store(0, Ordering::Relaxed);
+    }
+}
+
+/// The part of the cache that threads read without its lock: the lookup table, the blocks
+/// of the current generation and that generation. What it returns is valid while the
+/// reading thread is in the cache (`thread::enter_cache`): no flush ends meanwhile.
+pub struct Index {
+    start: u64,
+    end: u64,
+    map: BlockMap,
+    /// Base of the block list of `Jit`, allocated once (capacity `MAX_BLOCKS`).
+    blocks: AtomicPtr<Block>,
+    /// Blocks `[0, published)` are complete.
+    published: AtomicUsize,
+    generation: AtomicU64,
+}
+
+impl Index {
+    /// The block at `rip` and its host code, if translated in this generation.
+    pub fn lookup(&self, rip: u64) -> Option<(u32, u64)> {
+        let id = self.map.get(rip)?;
+        Some((id, self.blocks()[id as usize].host))
+    }
+
+    /// Counts flushes; an exit id is only valid in the generation that made it.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn blocks(&self) -> &[Block] {
+        let len = self.published.load(Ordering::Acquire);
+        // `Jit` never reallocates the list and only writes past `published` until a flush.
+        unsafe { core::slice::from_raw_parts(self.blocks.load(Ordering::Relaxed), len) }
+    }
+
+    fn publish(&self, blocks: &mut Vec<Block>) {
+        self.blocks.store(blocks.as_mut_ptr(), Ordering::Relaxed);
+        self.published.store(blocks.len(), Ordering::Release);
+    }
+
+    /// The block whose host code holds `pc`. Blocks of a generation are laid out in the
+    /// order of their ids; the start area belongs to no block. A `pc` outside the arena
+    /// returns before the block list is read: the signal handler calls this from any pc,
+    /// and only a thread in translated code knows no flush is emptying the list.
+    pub fn block_at(&self, pc: u64) -> Option<(u32, &Block)> {
+        if pc < self.start || pc >= self.end {
+            return None;
+        }
+        let blocks = self.blocks();
+        let n = blocks.partition_point(|b| b.host <= pc);
+        let id = n.checked_sub(1)?;
+        let b = &blocks[id];
+        (pc < b.host + b.host_len as u64).then_some((id as u32, b))
     }
 }
 
@@ -145,11 +239,14 @@ pub struct Jit {
     top: u64,
     exit_thunk: u64,
     indirect_exit: u64,
+    /// Published through `index`; capacity `MAX_BLOCKS`, so it never reallocates.
     blocks: Vec<Block>,
+    /// Ids of the exits of any block that are chained to each block, by block id.
+    incoming: Vec<Vec<u32>>,
     exits: Vec<Exit>,
-    map: BlockMap,
     /// Counts flushes; an exit id is only valid in the generation that made it.
     generation: u64,
+    index: &'static Index,
 }
 
 fn align_up(addr: u64, align: u64) -> u64 {
@@ -179,17 +276,31 @@ impl Jit {
         let code = asm.into_bytes();
         unsafe { core::ptr::copy_nonoverlapping(code.as_ptr(), base as *mut u8, code.len()) };
 
+        let mut blocks = Vec::with_capacity(MAX_BLOCKS);
+        let index = Box::leak(Box::new(Index {
+            start: base + START_AREA,
+            end: base + CODE_CACHE_SIZE,
+            map: BlockMap::new(),
+            blocks: AtomicPtr::new(blocks.as_mut_ptr()),
+            published: AtomicUsize::new(0),
+            generation: AtomicU64::new(0),
+        }));
         Ok(Jit {
             start: base + START_AREA,
             end: base + CODE_CACHE_SIZE,
             top: base + START_AREA,
             exit_thunk,
             indirect_exit,
-            blocks: Vec::new(),
+            blocks,
+            incoming: Vec::new(),
             exits: Vec::new(),
-            map: BlockMap::new(),
             generation: 0,
+            index,
         })
+    }
+
+    pub fn index(&self) -> &'static Index {
+        self.index
     }
 
     pub fn generation(&self) -> u64 {
@@ -201,28 +312,14 @@ impl Jit {
     }
 
     pub fn lookup(&self, rip: u64) -> Option<u32> {
-        self.map.get(rip)
-    }
-
-    /// The block whose host code holds `pc`. Blocks of a generation are laid out in the
-    /// order of their ids; the start area belongs to no block. A `pc` outside the arena
-    /// returns before the block list is read: the signal handler calls this from any pc,
-    /// and only a thread in translated code knows the dispatcher is not changing the list.
-    pub fn block_at(&self, pc: u64) -> Option<u32> {
-        if pc < self.start || pc >= self.end {
-            return None;
-        }
-        let n = self.blocks.partition_point(|b| b.host <= pc);
-        let id = n.checked_sub(1)?;
-        let b = &self.blocks[id];
-        (pc < b.host + b.host_len as u64).then_some(id as u32)
+        self.index.map.get(rip)
     }
 
     /// Translates the block at `rip` and installs it, emptying the cache first if it does
-    /// not fit.
+    /// not fit in the arena or in the block list.
     pub fn translate(&mut self, rip: u64, mem: &Mem) -> Result<u32, Fault> {
         let mut t = self.translate_at_top(rip, mem)?;
-        if self.top + t.code.len() as u64 > self.end {
+        if self.top + t.code.len() as u64 > self.end || self.blocks.len() >= MAX_BLOCKS {
             self.flush();
             t = self.translate_at_top(rip, mem)?;
         }
@@ -239,6 +336,8 @@ impl Jit {
         translate::translate(mem, rip, &env)
     }
 
+    /// Writes the code, then publishes the block, then its rip in the table: a thread that
+    /// finds the rip finds the block and its code complete.
     fn install(&mut self, t: Translation) -> u32 {
         let host = self.top;
         // The arena is calco's RWX memory and [host, host + len) is free.
@@ -255,6 +354,7 @@ impl Jit {
                 linked: false,
             });
         }
+        assert!(self.blocks.len() < MAX_BLOCKS, "block list full");
         self.blocks.push(Block {
             rip: t.rip,
             guest_end: t.guest_end,
@@ -263,36 +363,44 @@ impl Jit {
             insns: t.insns as u32,
             pcs: t.pcs,
             exits: first..self.exits.len() as u32,
-            incoming: Vec::new(),
         });
-        self.map.insert(t.rip, id);
+        self.incoming.push(Vec::new());
+        self.index.publish(&mut self.blocks);
+        self.index.map.insert(t.rip, id);
         id
     }
 
-    /// Empties the whole cache (contract 3.7). Only valid with no thread inside it.
+    /// Empties the whole cache (contract 3.7) once no other thread is in it
+    /// (`thread::safe_point`). The caller holds the cache lock.
     pub fn flush(&mut self) {
-        self.blocks.clear();
-        self.exits.clear();
-        self.map.clear();
-        self.top = self.start;
-        self.generation += 1;
+        let index = self.index;
+        thread::safe_point(|| {
+            self.blocks.clear();
+            self.incoming.clear();
+            self.exits.clear();
+            index.map.clear();
+            index.publish(&mut self.blocks);
+            self.top = self.start;
+            self.generation += 1;
+            index.generation.store(self.generation, Ordering::Release);
+        });
     }
 
     /// Chains exit `exit` to `block`, whose rip is the exit's target.
     pub fn link(&mut self, exit: u32, block: u32) {
         let e = &mut self.exits[exit as usize];
-        let b = &mut self.blocks[block as usize];
+        let b = &self.blocks[block as usize];
         if e.linked || e.target != b.rip {
             return;
         }
         patch_rel32(e.jump, b.host);
         e.linked = true;
-        b.incoming.push(exit);
+        self.incoming[block as usize].push(exit);
     }
 
     /// Points every exit chained to `block` back at its stub (for invalidation).
     pub fn unlink_incoming(&mut self, block: u32) {
-        for exit in std::mem::take(&mut self.blocks[block as usize].incoming) {
+        for exit in std::mem::take(&mut self.incoming[block as usize]) {
             let e = &mut self.exits[exit as usize];
             patch_rel32(e.jump, e.stub);
             e.linked = false;
@@ -323,55 +431,79 @@ fn patch_rel32(site: u64, target: u64) {
     field.store(rel as u32, Ordering::Release);
 }
 
-/// Runs the guest from `cpu.rip`: looks up or translates the block, enters it and serves
-/// the reason it exited for, until the guest exits or dies.
-pub fn run(cpu: &mut Cpu, mem: &mut Mem, jit: &mut Jit, state: &mut syscall::State) -> ! {
-    // Translated code reaches the Cpu through GS; nothing else in calco uses GS.
-    unsafe { sys::set_gs_base(cpu as *mut Cpu as u64) };
-    signal::init(cpu, &mut state.signals, jit);
+/// Runs the guest thread of `cpu` from `cpu.rip`: looks up or translates the block, enters
+/// it and serves the reason it exited for, until the thread calls `exit`. Returns the code
+/// it passed. `me` is the thread's entry in the thread list.
+pub fn run(cpu: &mut Cpu, me: &Arc<Member>) -> u64 {
+    let index = thread::shared().index;
     // Exit to chain to the next block, with the generation it belongs to.
     let mut chain: Option<(u32, u64)> = None;
     loop {
         if signal::wants_delivery(cpu) {
-            state.signals.deliver(cpu, mem);
+            let mut world = thread::shared().world();
+            let world = &mut *world;
+            world.state.signals.deliver(cpu, &world.mem);
         }
-        let block = match jit.lookup(cpu.rip) {
-            Some(block) => block,
-            None => match jit.translate(cpu.rip, mem) {
-                Ok(block) => block,
-                Err(f) => {
-                    signal::exec_fault(cpu, mem, f.signal as u32, f.addr);
-                    chain = None;
-                    continue;
-                }
+        thread::enter_cache(me);
+        let host = match index.lookup(cpu.rip) {
+            Some((_, host)) if chain.is_none() => host,
+            _ => match locked_block(cpu, me, chain.take()) {
+                Some(host) => host,
+                None => continue,
             },
         };
-        if let Some((exit, generation)) = chain.take()
-            && generation == jit.generation()
-        {
-            jit.link(exit, block);
-        }
-        let host = jit.block(block).host;
         unsafe { trampoline::enter(cpu, host) };
+        // Read while still in the cache: no flush ends before the thread leaves it.
+        let generation = index.generation();
+        thread::leave_cache(me);
         cpu.rip = cpu.next_rip;
         let reason = cpu.exit_reason;
         let kind = reason as u32;
         match kind & 0xff {
-            EXIT_BRANCH => chain = Some(((reason >> 32) as u32, jit.generation())),
+            EXIT_BRANCH => chain = Some(((reason >> 32) as u32, generation)),
             EXIT_INDIRECT => {}
-            EXIT_SYSCALL => {
-                syscall::handle(cpu, mem, state);
-                // Guest code was unmapped or changed: no translation of it may survive.
-                if state.take_code_changed() {
-                    jit.flush();
-                }
-            }
+            // The end of a guest thread is `thread.rs`'s business.
+            EXIT_SYSCALL if cpu.gpr[RAX] == syscall::EXIT => return cpu.gpr[RDI],
+            EXIT_SYSCALL => syscall::handle(cpu, me),
             EXIT_CPUID => cpuid::handle(cpu),
             EXIT_SIGNAL => signal::trap(cpu, (kind >> 8) & 0xff),
             EXIT_INTERRUPTED => {}
             _ => panic!("unknown exit reason {reason:#x}"),
         }
     }
+}
+
+/// The host code of the block at `cpu.rip`, under the cache lock: translated if no thread
+/// did it meanwhile, and with the exit `chain` linked to it if it is of this generation.
+/// `None` if the code cannot be fetched; the guest then gets the fault. The thread is in
+/// the cache when this returns `Some`.
+fn locked_block(cpu: &mut Cpu, me: &Member, chain: Option<(u32, u64)>) -> Option<u64> {
+    let shared = thread::shared();
+    // A thread waiting for the lock is out of the cache, so a flush does not wait for it.
+    thread::leave_cache(me);
+    let mut jit = shared.jit();
+    // No flush runs while this thread holds the lock: entering does not park.
+    thread::enter_cache(me);
+    let block = match jit.lookup(cpu.rip) {
+        Some(block) => block,
+        None => {
+            let world = shared.world();
+            match jit.translate(cpu.rip, &world.mem) {
+                Ok(block) => block,
+                Err(f) => {
+                    signal::exec_fault(cpu, &world.mem, f.signal as u32, f.addr);
+                    thread::leave_cache(me);
+                    return None;
+                }
+            }
+        }
+    };
+    if let Some((exit, generation)) = chain
+        && generation == jit.generation()
+    {
+        jit.link(exit, block);
+    }
+    Some(jit.block(block).host)
 }
 
 #[cfg(test)]
