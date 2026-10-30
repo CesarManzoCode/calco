@@ -23,6 +23,11 @@ Fuente única de lo que calco no demuestra o no hace. Ningún otro archivo los r
 - La cobertura cuenta mnemónicos de `isa/scope.tsv` (470 de 470 al cerrar K1), no cada forma de operandos ni cada codificación de un mnemónico.
 - Que el arnés detecte fallos se demuestra solo con los 6 mutantes fijos, cada uno de una línea en `emit/` o `jit/`. La reducción a 3 instrucciones o menos se demuestra solo sobre sus contraejemplos.
 - El número de discrepancias de qemu-x86_64 y el resultado del modo estricto no quedaron registrados al cerrar K1.
+- Señales, hilos, código automodificable y `execve` se demostraron solo con invitados estáticos: `guests/signals.c` (no-PIE), `guests/threads.c`, `guests/smc.c`, `guests/exec.c`, y `linux-test` y `testthread` de QEMU. Los únicos invitados dinámicos comprobados son `guests/hello.c` (salida) y `guests/pause.c` (permisos).
+- La entrega de señales con estado exacto se demuestra solo con los cuatro casos de `guests/signals.c`: SIGSEGV por escritura con corrección de contexto, SIGILL por `ud2`, SIGFPE por división entre cero y SIGALRM de `setitimer` en un bucle de solo registros.
+- Los hilos se demuestran con 50 corridas seguidas de `guests/threads.c` y una de `testthread` en una sola máquina. Una carrera que no aparezca en esas corridas no queda descartada.
+- El código automodificable se demuestra con un solo hilo (`guests/smc.c`). No hay prueba de un hilo que modifica código que otro está ejecutando.
+- La ausencia de `x` en un invitado dinámico se comprueba, por nombre, solo para el ejecutable, `ld-linux-x86-64.so.2` y `libc.so.6`. Otras bibliotecas que cargue el invitado no las revisa ninguna prueba.
 
 ## Sistema
 
@@ -65,5 +70,5 @@ Fuente única de lo que calco no demuestra o no hace. Ningún otro archivo los r
 
 - Todas las mediciones son de una sola máquina, sin root, sin aislar el sistema más allá de fijar un núcleo.
 - La comparación con nativo es un costo de traducción, no una comparación de velocidad entre iguales.
-- En K1 el código de verificación es mayor que el del traductor (`python3 scripts/loc.py`: `traductor: 3927`, `verificacion: 4450`). El criterio «arnés menor que traductor» no se cumple en K1 y se evalúa en K2.
+- En K1 el código de verificación era mayor que el del traductor (`python3 scripts/loc.py`: `traductor: 3927`, `verificacion: 4450`). En el cierre de K2 el criterio «arnés menor que traductor» pasa, pero los conteos de ese cierre no quedaron registrados.
 - `testthread` se compara por hilo y como multiconjunto de líneas, porque su orden global no es estable ni en nativo.
