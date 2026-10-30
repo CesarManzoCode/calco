@@ -28,6 +28,10 @@ Fuente única de lo que calco no demuestra o no hace. Ningún otro archivo los r
 - `vfork` se emula como `fork`; `clone` con `CLONE_VM` sin `CLONE_THREAD` no está soportado.
 - Un hilo que está ejecutando un bloque cuando otro hilo modifica ese código lo termina con la versión vieja.
 - Llamadas al sistema fuera de la lista del contrato devuelven `ENOSYS`.
+- `mremap` con `MREMAP_DONTUNMAP` devuelve `EINVAL`, y solo acepta rangos dentro de un único intervalo del invitado.
+- `mmap` ignora `MAP_32BIT`: la colocación sin dirección fija siempre usa la ventana del invitado.
+- `readlink` solo reescribe `/proc/self/exe` y `/proc/thread-self/exe`; `/proc/<pid>/exe` muestra a calco.
+- `prctl` solo acepta `PR_SET_NAME`, `PR_GET_NAME` y `PR_SET_PDEATHSIG`; el resto devuelve `EINVAL`.
 
 ## Mediciones
 

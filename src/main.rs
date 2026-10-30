@@ -22,8 +22,6 @@ use std::process::exit;
 /// Exit status for errors of calco itself, not of the guest.
 const EXIT_CALCO: i32 = 125;
 const USAGE: &str = "usage: calco [--argv0 NAME] [--] PROGRAM [ARGS...]";
-/// `AT_HWCAP` until k1-04 passes CPUID.1:EDX filtered by `cpuid.rs`.
-const HWCAP_PENDING: u64 = 0;
 
 fn fail(msg: &str) -> ! {
     eprintln!("calco: {msg}");
@@ -81,7 +79,7 @@ fn main() {
     let program = PathBuf::from(args.program);
     let mut mem = mem::Mem::new();
     let loaded =
-        loader::load(&program, &mut mem, &argv, &envp, HWCAP_PENDING).unwrap_or_else(|e| fail(&e));
+        loader::load(&program, &mut mem, &argv, &envp, cpuid::hwcap()).unwrap_or_else(|e| fail(&e));
     let mut cpu = cpu::Cpu::new(loaded.entry, loaded.rsp);
     let mut jit = jit::Jit::new(&mem).unwrap_or_else(|e| {
         fail(&format!(
@@ -89,5 +87,11 @@ fn main() {
             std::io::Error::from_raw_os_error(e)
         ))
     });
-    jit::run(&mut cpu, &mut mem, &mut jit)
+    // What the guest reads from /proc/self/exe; calco's own path is the kernel's answer.
+    let exe = std::fs::canonicalize(&program).unwrap_or(program);
+    let log = env::var_os("CALCO_LOG")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let mut state = syscall::State::new(exe.into_os_string().into_vec(), log);
+    jit::run(&mut cpu, &mut mem, &mut jit, &mut state)
 }

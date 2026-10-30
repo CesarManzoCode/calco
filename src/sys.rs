@@ -12,6 +12,7 @@ pub const SYS_MPROTECT: usize = 10;
 pub const SYS_MUNMAP: usize = 11;
 pub const SYS_RT_SIGACTION: usize = 13;
 pub const SYS_RT_SIGPROCMASK: usize = 14;
+pub const SYS_MREMAP: usize = 25;
 pub const SYS_GETPID: usize = 39;
 pub const SYS_EXIT: usize = 60;
 pub const SYS_GETUID: usize = 102;
@@ -37,6 +38,9 @@ pub const MAP_FIXED_NOREPLACE: u32 = 0x100000;
 // /usr/include/linux/mman.h
 pub const MAP_SHARED: u32 = 0x01;
 pub const MAP_PRIVATE: u32 = 0x02;
+pub const MREMAP_MAYMOVE: u32 = 1;
+pub const MREMAP_FIXED: u32 = 2;
+pub const MREMAP_DONTUNMAP: u32 = 4;
 // /usr/include/asm-generic/mman.h
 pub const MAP_NORESERVE: u32 = 0x4000;
 
@@ -45,6 +49,7 @@ pub const EPERM: i32 = 1;
 pub const EINTR: i32 = 4;
 pub const ENOMEM: i32 = 12;
 pub const EACCES: i32 = 13;
+pub const EFAULT: i32 = 14;
 pub const EEXIST: i32 = 17;
 pub const EINVAL: i32 = 22;
 // /usr/include/asm-generic/errno.h
@@ -191,6 +196,28 @@ pub unsafe fn munmap(addr: u64, len: u64) -> Result<(), i32> {
 /// The caller must own the range.
 pub unsafe fn mprotect(addr: u64, len: u64, prot: u32) -> Result<(), i32> {
     check(unsafe { syscall3(SYS_MPROTECT, addr as usize, len as usize, prot as usize) }).map(|_| ())
+}
+
+/// # Safety
+/// The caller must own both the old range and, with `MREMAP_FIXED`, the new one.
+pub unsafe fn mremap(
+    old: u64,
+    old_len: u64,
+    new_len: u64,
+    flags: u32,
+    new: u64,
+) -> Result<u64, i32> {
+    let ret = unsafe {
+        syscall5(
+            SYS_MREMAP,
+            old as usize,
+            old_len as usize,
+            new_len as usize,
+            flags as usize,
+            new as usize,
+        )
+    };
+    check(ret).map(|v| v as u64)
 }
 
 pub fn getuid() -> u64 {

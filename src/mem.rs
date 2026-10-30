@@ -7,8 +7,9 @@
 use std::collections::BTreeMap;
 
 use crate::sys::{
-    self, EEXIST, EINVAL, ENOMEM, MAP_ANONYMOUS, MAP_FIXED, MAP_FIXED_NOREPLACE, MAP_NORESERVE,
-    MAP_POPULATE, MAP_PRIVATE, MAP_STACK, MAP_TYPE, PROT_EXEC, PROT_NONE, PROT_READ, PROT_WRITE,
+    self, EEXIST, EFAULT, EINVAL, ENOMEM, MAP_ANONYMOUS, MAP_FIXED, MAP_FIXED_NOREPLACE,
+    MAP_NORESERVE, MAP_POPULATE, MAP_PRIVATE, MAP_STACK, MAP_TYPE, MREMAP_FIXED, MREMAP_MAYMOVE,
+    PROT_EXEC, PROT_NONE, PROT_READ, PROT_WRITE,
 };
 
 pub const PAGE_SIZE: u64 = 4096;
@@ -85,7 +86,7 @@ impl Intervals {
         (end > addr).then_some(Region { start, end, prot })
     }
 
-    fn overlapping(&self, start: u64, end: u64) -> Vec<Region> {
+    pub fn overlapping(&self, start: u64, end: u64) -> Vec<Region> {
         let mut out: Vec<Region> = self
             .map
             .range(..end)
@@ -388,6 +389,97 @@ impl Mem {
         }
         self.intervals.remove(addr, end);
         Ok(())
+    }
+
+    /// Emulated `mremap` of a guest range: shrinks or grows in place, or moves to the
+    /// placement window (`MREMAP_MAYMOVE`) or to a fixed address (`MREMAP_FIXED`), never
+    /// over calco memory. The range must lie in one guest interval; `MREMAP_DONTUNMAP` is
+    /// not supported.
+    pub fn remap(
+        &mut self,
+        old: u64,
+        old_len: u64,
+        new_len: u64,
+        flags: u32,
+        new_addr: u64,
+    ) -> Result<u64, i32> {
+        if old % PAGE_SIZE != 0 || flags & !(MREMAP_MAYMOVE | MREMAP_FIXED) != 0 {
+            return Err(EINVAL);
+        }
+        if flags & MREMAP_FIXED != 0 && flags & MREMAP_MAYMOVE == 0 {
+            return Err(EINVAL);
+        }
+        if old_len == 0 || new_len == 0 || old_len > USER_END || new_len > USER_END {
+            return Err(EINVAL);
+        }
+        let old_len = page_up(old_len);
+        let new_len = page_up(new_len);
+        let old_end = old
+            .checked_add(old_len)
+            .filter(|&e| e <= USER_END)
+            .ok_or(EFAULT)?;
+        let prot = self
+            .intervals
+            .find(old)
+            .filter(|r| r.end >= old_end)
+            .ok_or(EFAULT)?
+            .prot;
+
+        if flags & MREMAP_FIXED != 0 {
+            if new_addr % PAGE_SIZE != 0 {
+                return Err(EINVAL);
+            }
+            let new_end = new_addr
+                .checked_add(new_len)
+                .filter(|&e| e <= USER_END)
+                .ok_or(EINVAL)?;
+            if new_addr < old_end && old < new_end {
+                return Err(EINVAL);
+            }
+            // Claims the target like a guest MAP_FIXED: ENOMEM over calco memory.
+            self.map_anon(new_addr, new_len, PROT_NONE, MAP_PRIVATE | MAP_FIXED)?;
+            return self.move_range(old, old_len, new_len, new_addr, prot);
+        }
+        if new_len <= old_len {
+            if new_len < old_len {
+                self.unmap(old + new_len, old_len - new_len)?;
+            }
+            return Ok(old);
+        }
+        // In place when the pages after the range are free in the host and stay below the
+        // window end, away from calco's own mappings.
+        if let Some(end) = old.checked_add(new_len).filter(|&e| e <= WINDOW_END)
+            && !self.intervals.overlaps(old_end, end)
+            && unsafe { sys::mremap(old, old_len, new_len, 0, 0) }.is_ok()
+        {
+            self.intervals.insert(old_end, end, prot);
+            return Ok(old);
+        }
+        if flags & MREMAP_MAYMOVE == 0 {
+            return Err(ENOMEM);
+        }
+        let target = self.map_anon(0, new_len, PROT_NONE, MAP_PRIVATE)?;
+        self.move_range(old, old_len, new_len, target, prot)
+    }
+
+    /// Moves `[old, old + old_len)` onto `target`, a guest range of `new_len` bytes just
+    /// claimed by the caller.
+    fn move_range(
+        &mut self,
+        old: u64,
+        old_len: u64,
+        new_len: u64,
+        target: u64,
+        prot: u32,
+    ) -> Result<u64, i32> {
+        let flags = MREMAP_MAYMOVE | MREMAP_FIXED;
+        if let Err(e) = unsafe { sys::mremap(old, old_len, new_len, flags, target) } {
+            let _ = self.unmap(target, new_len);
+            return Err(e);
+        }
+        self.intervals.remove(old, old + old_len);
+        self.intervals.insert(target, target + new_len, prot);
+        Ok(target)
     }
 
     /// Emulated `brk`: returns the new break, or the current one if the request is refused.

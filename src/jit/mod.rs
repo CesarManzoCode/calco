@@ -254,7 +254,7 @@ impl Jit {
     }
 
     /// Empties the whole cache (contract 3.7). Only valid with no thread inside it.
-    fn flush(&mut self) {
+    pub fn flush(&mut self) {
         self.blocks.clear();
         self.exits.clear();
         self.map.clear();
@@ -296,7 +296,7 @@ fn patch_rel32(site: u64, target: u64) {
 
 /// Runs the guest from `cpu.rip`: looks up or translates the block, enters it and serves
 /// the reason it exited for, until the guest exits or dies.
-pub fn run(cpu: &mut Cpu, mem: &mut Mem, jit: &mut Jit) -> ! {
+pub fn run(cpu: &mut Cpu, mem: &mut Mem, jit: &mut Jit, state: &mut syscall::State) -> ! {
     // Translated code reaches the Cpu through GS; nothing else in calco uses GS.
     unsafe { sys::set_gs_base(cpu as *mut Cpu as u64) };
     // Exit to chain to the next block, with the generation it belongs to.
@@ -321,7 +321,13 @@ pub fn run(cpu: &mut Cpu, mem: &mut Mem, jit: &mut Jit) -> ! {
         match kind & 0xff {
             EXIT_BRANCH => chain = Some(((reason >> 32) as u32, jit.generation())),
             EXIT_INDIRECT => {}
-            EXIT_SYSCALL => syscall::handle(cpu, mem),
+            EXIT_SYSCALL => {
+                syscall::handle(cpu, mem, state);
+                // Guest code was unmapped or changed: no translation of it may survive.
+                if state.take_code_changed() {
+                    jit.flush();
+                }
+            }
             EXIT_CPUID => cpuid::handle(cpu),
             EXIT_SIGNAL => sys::die_by_signal((kind >> 8) as i32),
             _ => panic!("unknown exit reason {reason:#x}"),
