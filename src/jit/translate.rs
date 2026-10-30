@@ -33,6 +33,9 @@ pub const EXIT_SYSCALL: u32 = 3;
 pub const EXIT_CPUID: u32 = 4;
 /// The guest gets a signal; bits 8–15 hold its number.
 pub const EXIT_SIGNAL: u32 = 5;
+/// The signal handler brought the thread back with the guest state already in `Cpu`, or
+/// `enter` saw a pending signal (contract 3.11).
+pub const EXIT_INTERRUPTED: u32 = 6;
 
 const SIGILL: i32 = Signal::Sigill.number();
 const SIGSEGV: i32 = Signal::Sigsegv.number();

@@ -10,6 +10,7 @@ mod emit;
 mod jit;
 mod loader;
 mod mem;
+mod signal;
 mod sys;
 mod syscall;
 

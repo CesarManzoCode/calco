@@ -15,12 +15,13 @@ use crate::cpu::{Cpu, OFF_EXIT_REASON};
 use crate::cpuid;
 use crate::emit::{self, Asm};
 use crate::mem::{CODE_CACHE_SIZE, Mem};
+use crate::signal;
 use crate::sys::{self, EINVAL, PROT_EXEC, PROT_READ, PROT_WRITE};
 use crate::syscall;
 
 use self::translate::{
-    EXIT_BRANCH, EXIT_CPUID, EXIT_INDIRECT, EXIT_SIGNAL, EXIT_SYSCALL, Env, Fault, GuestCode,
-    PcEntry, Translation,
+    EXIT_BRANCH, EXIT_CPUID, EXIT_INDIRECT, EXIT_INTERRUPTED, EXIT_SIGNAL, EXIT_SYSCALL, Env,
+    Fault, GuestCode, PcEntry, Translation,
 };
 
 /// Space kept free after the start area: the exit thunk and the indirect exit.
@@ -203,6 +204,20 @@ impl Jit {
         self.map.get(rip)
     }
 
+    /// The block whose host code holds `pc`. Blocks of a generation are laid out in the
+    /// order of their ids; the start area belongs to no block. A `pc` outside the arena
+    /// returns before the block list is read: the signal handler calls this from any pc,
+    /// and only a thread in translated code knows the dispatcher is not changing the list.
+    pub fn block_at(&self, pc: u64) -> Option<u32> {
+        if pc < self.start || pc >= self.end {
+            return None;
+        }
+        let n = self.blocks.partition_point(|b| b.host <= pc);
+        let id = n.checked_sub(1)?;
+        let b = &self.blocks[id];
+        (pc < b.host + b.host_len as u64).then_some(id as u32)
+    }
+
     /// Translates the block at `rip` and installs it, emptying the cache first if it does
     /// not fit.
     pub fn translate(&mut self, rip: u64, mem: &Mem) -> Result<u32, Fault> {
@@ -283,6 +298,19 @@ impl Jit {
             e.linked = false;
         }
     }
+
+    /// Points every chained exit of `block` back at its stub, so the block leaves to the
+    /// dispatcher at its end (signal delivery without TF, contract 3.11).
+    pub fn unlink_outgoing(&mut self, block: u32) {
+        let exits = self.blocks[block as usize].exits.clone();
+        for exit in exits {
+            let e = &mut self.exits[exit as usize];
+            if e.linked {
+                patch_rel32(e.jump, e.stub);
+                e.linked = false;
+            }
+        }
+    }
 }
 
 /// Points the rel32 at `site` to `target` with one aligned 4-byte store, so a thread
@@ -300,14 +328,23 @@ fn patch_rel32(site: u64, target: u64) {
 pub fn run(cpu: &mut Cpu, mem: &mut Mem, jit: &mut Jit, state: &mut syscall::State) -> ! {
     // Translated code reaches the Cpu through GS; nothing else in calco uses GS.
     unsafe { sys::set_gs_base(cpu as *mut Cpu as u64) };
+    signal::init(cpu, &mut state.signals, jit);
     // Exit to chain to the next block, with the generation it belongs to.
     let mut chain: Option<(u32, u64)> = None;
     loop {
+        if signal::wants_delivery(cpu) {
+            state.signals.deliver(cpu, mem);
+        }
         let block = match jit.lookup(cpu.rip) {
             Some(block) => block,
-            None => jit
-                .translate(cpu.rip, mem)
-                .unwrap_or_else(|f| sys::die_by_signal(f.signal)),
+            None => match jit.translate(cpu.rip, mem) {
+                Ok(block) => block,
+                Err(f) => {
+                    signal::exec_fault(cpu, mem, f.signal as u32, f.addr);
+                    chain = None;
+                    continue;
+                }
+            },
         };
         if let Some((exit, generation)) = chain.take()
             && generation == jit.generation()
@@ -330,7 +367,8 @@ pub fn run(cpu: &mut Cpu, mem: &mut Mem, jit: &mut Jit, state: &mut syscall::Sta
                 }
             }
             EXIT_CPUID => cpuid::handle(cpu),
-            EXIT_SIGNAL => sys::die_by_signal((kind >> 8) as i32),
+            EXIT_SIGNAL => signal::trap(cpu, (kind >> 8) & 0xff),
+            EXIT_INTERRUPTED => {}
             _ => panic!("unknown exit reason {reason:#x}"),
         }
     }

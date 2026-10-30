@@ -34,7 +34,14 @@ Fuente única de lo que calco no demuestra o no hace. Ningún otro archivo los r
 - `vfork` se emula como `fork`; `clone` con `CLONE_VM` sin `CLONE_THREAD` no está soportado.
 - `execve` comprueba antes de reemplazar el proceso lo que el kernel comprueba del archivo (existencia, permiso de ejecución, archivo regular, formato y cadena de `#!`); si el calco nuevo falla después al cargar el programa, termina con código 125 en lugar de devolver el errno al invitado.
 - `execveat` relativo a un descriptor o con `AT_EMPTY_PATH` pasa la ruta como `/proc/self/fd/N`: si el descriptor tiene `O_CLOEXEC`, el calco nuevo ya no puede abrirlo y termina con código 125.
-- `execve` no lleva al programa nuevo la máscara de señales ni las señales ignoradas del invitado.
+- `execve` lleva al programa nuevo la máscara y las señales ignoradas a través de las del anfitrión, salvo SIGPIPE, que siempre empieza con la acción por defecto (el runtime de Rust la ignora antes de `main`), y salvo SIGSEGV, SIGBUS, SIGILL, SIGFPE y SIGTRAP, que calco nunca bloquea en el anfitrión y por eso nunca llegan bloqueadas.
+- `pause` no está en la lista cerrada de llamadas y devuelve `ENOSYS`.
+- Una llamada con tiempo límite (`nanosleep`, `clock_nanosleep`, `poll`, `select`, `epoll_wait`, `futex`…) interrumpida por una señal que el invitado no maneja se reinicia con el tiempo original, no con el que le faltaba.
+- `signalfd4` traduce la máscara, pero las lecturas del descriptor dan los números del anfitrión: 64 y 63 para las señales 32 y 33 del invitado. `rt_sigtimedwait` y los marcos sí las traducen.
+- El área de punto flotante del marco de señal es FXSAVE de 512 bytes, sin XSAVE (coherente con CPUID), así que el marco queda en otra dirección de la pila que en nativo, donde el kernel usa XSAVE.
+- Si no se puede escribir el marco de una señal (pila inválida o sin `SA_RESTORER`), el proceso muere por SIGSEGV; el kernel en cambio fuerza un SIGSEGV que un manejador de SIGSEGV del invitado todavía podría atender.
+- Mientras calco avanza con TF hasta la siguiente frontera, una instrucción `pushfq` del invitado guarda TF encendida, y un `popfq` que la apaga detiene el avance: la señal se entrega cuando el bloque sale al despachador.
+- Del `siginfo_t` de una señal del anfitrión solo se traducen `si_signo` y el `si_status` de SIGCHLD; cualquier otro campo que lleve un número de señal (por ejemplo un `si_value` armado por el emisor) llega como lo da el kernel.
 - Un hilo que está ejecutando un bloque cuando otro hilo modifica ese código lo termina con la versión vieja.
 - Llamadas al sistema fuera de la lista del contrato devuelven `ENOSYS`.
 - `mremap` con `MREMAP_DONTUNMAP` devuelve `EINVAL`, y solo acepta rangos dentro de un único intervalo del invitado.

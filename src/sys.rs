@@ -12,6 +12,7 @@ pub const SYS_MPROTECT: usize = 10;
 pub const SYS_MUNMAP: usize = 11;
 pub const SYS_RT_SIGACTION: usize = 13;
 pub const SYS_RT_SIGPROCMASK: usize = 14;
+pub const SYS_RT_SIGRETURN: usize = 15;
 pub const SYS_MREMAP: usize = 25;
 pub const SYS_CLONE: usize = 56;
 pub const SYS_EXECVE: usize = 59;
@@ -21,6 +22,11 @@ pub const SYS_GETUID: usize = 102;
 pub const SYS_GETGID: usize = 104;
 pub const SYS_GETEUID: usize = 107;
 pub const SYS_GETEGID: usize = 108;
+pub const SYS_RT_SIGPENDING: usize = 127;
+pub const SYS_RT_SIGTIMEDWAIT: usize = 128;
+pub const SYS_RT_SIGQUEUEINFO: usize = 129;
+pub const SYS_RT_SIGSUSPEND: usize = 130;
+pub const SYS_SIGALTSTACK: usize = 131;
 pub const SYS_GETTID: usize = 186;
 pub const SYS_EXIT_GROUP: usize = 231;
 pub const SYS_TGKILL: usize = 234;
@@ -75,6 +81,7 @@ pub const X_OK: usize = 1;
 // /usr/include/asm-generic/signal-defs.h
 const SIG_DFL: usize = 0;
 const SIG_UNBLOCK: usize = 1;
+const SIG_BLOCK: usize = 0;
 
 /// # Safety
 /// The call must be valid for the kernel with no arguments.
@@ -314,11 +321,68 @@ pub fn execve(path: &[u8], argv: &[Vec<u8>], envp: &[Vec<u8>]) -> i32 {
 
 /// `struct sigaction` as `rt_sigaction` takes it on x86-64.
 #[repr(C)]
-struct KernelSigaction {
-    handler: usize,
-    flags: u64,
-    restorer: usize,
-    mask: u64,
+#[derive(Clone, Copy, Debug, Default)]
+pub struct KernelSigaction {
+    pub handler: usize,
+    pub flags: u64,
+    pub restorer: usize,
+    pub mask: u64,
+}
+
+/// `rt_sigaction` of host signal `sig`: sets `new` if given and returns the old action.
+pub fn rt_sigaction(sig: u32, new: Option<&KernelSigaction>) -> Result<KernelSigaction, i32> {
+    let mut old = KernelSigaction::default();
+    let new = new.map_or(0, |a| a as *const KernelSigaction as usize);
+    let ret = unsafe {
+        syscall4(
+            SYS_RT_SIGACTION,
+            sig as usize,
+            new,
+            &mut old as *mut KernelSigaction as usize,
+            8,
+        )
+    };
+    check(ret).map(|_| old)
+}
+
+/// `rt_sigprocmask` of this thread with `how` and `set`; without a set only reads it.
+/// Returns the old mask.
+pub fn rt_sigprocmask(how: usize, set: Option<u64>) -> Result<u64, i32> {
+    let mut old = 0u64;
+    let set_ptr = set.as_ref().map_or(0, |s| s as *const u64 as usize);
+    let how = if set.is_some() { how } else { SIG_BLOCK };
+    let ret = unsafe {
+        syscall4(
+            SYS_RT_SIGPROCMASK,
+            how,
+            set_ptr,
+            &mut old as *mut u64 as usize,
+            8,
+        )
+    };
+    check(ret).map(|_| old)
+}
+
+/// Host signals pending for this thread or the process.
+pub fn rt_sigpending() -> Result<u64, i32> {
+    let mut set = 0u64;
+    check(unsafe { syscall2(SYS_RT_SIGPENDING, &mut set as *mut u64 as usize, 8) }).map(|_| set)
+}
+
+/// Sets the alternate signal stack of this thread to `[sp, sp + size)`.
+pub fn sigaltstack(sp: u64, size: u64) -> Result<(), i32> {
+    // stack_t: ss_sp, ss_flags (int, padded), ss_size.
+    let ss: [u64; 3] = [sp, 0, size];
+    check(unsafe { syscall2(SYS_SIGALTSTACK, ss.as_ptr() as usize, 0) }).map(|_| ())
+}
+
+/// Sends host signal `sig` to this thread.
+pub fn tgkill_self(sig: u32) {
+    unsafe {
+        let pid = syscall0(SYS_GETPID) as usize;
+        let tid = syscall0(SYS_GETTID) as usize;
+        syscall3(SYS_TGKILL, pid, tid, sig as usize);
+    }
 }
 
 /// Dies by `sig` as its default action does: restores `SIG_DFL`, unblocks it and sends it
@@ -326,33 +390,21 @@ struct KernelSigaction {
 pub fn die_by_signal(sig: i32) -> ! {
     let action = KernelSigaction {
         handler: SIG_DFL,
-        flags: 0,
-        restorer: 0,
-        mask: 0,
+        ..KernelSigaction::default()
     };
-    let set: u64 = 1 << (sig - 1);
-    unsafe {
-        syscall4(
-            SYS_RT_SIGACTION,
-            sig as usize,
-            &action as *const KernelSigaction as usize,
-            0,
-            8,
-        );
-        syscall4(
-            SYS_RT_SIGPROCMASK,
-            SIG_UNBLOCK,
-            &set as *const u64 as usize,
-            0,
-            8,
-        );
-        let pid = syscall0(SYS_GETPID) as usize;
-        let tid = syscall0(SYS_GETTID) as usize;
-        syscall3(SYS_TGKILL, pid, tid, sig as usize);
-        // Only if the signal did not kill: the exit status a shell shows for it.
-        syscall1(SYS_EXIT_GROUP, 128 + sig as usize);
-    }
+    let _ = rt_sigaction(sig as u32, Some(&action));
+    let _ = rt_sigprocmask(SIG_UNBLOCK, Some(1 << (sig - 1)));
+    tgkill_self(sig as u32);
+    // Only if the signal did not kill: the exit status a shell shows for it.
+    unsafe { syscall1(SYS_EXIT_GROUP, 128 + sig as usize) };
     unreachable!("exit_group returned")
+}
+
+/// The GS base of this thread (`rdgsbase`): its `Cpu`, or 0 outside guest threads.
+pub fn gs_base() -> u64 {
+    let base: u64;
+    unsafe { asm!("rdgsbase {}", out(reg) base, options(nomem, nostack, preserves_flags)) };
+    base
 }
 
 /// Points the GS base of this thread at `base` (`wrgsbase`, FSGSBASE is enabled).

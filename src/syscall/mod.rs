@@ -6,9 +6,11 @@
 //! `execve` runs calco again on the new program; `fork`, `vfork` and `clone` without
 //! `CLONE_VM` fork the host process, and the child goes on in the dispatcher.
 //!
-//! For now `rt_sigaction` and `rt_sigprocmask` only keep the guest state; nothing is
-//! installed in the host (k2-02). Signal delivery (k2-02) and `clone` with `CLONE_VM`
-//! (k2-03) return `-ENOSYS` until then.
+//! Every call that reaches the kernel goes through the safe system call of `signal/`, so
+//! a guest signal that arrives before the `syscall` skips it and the call runs again after
+//! the signal, or ends with `EINTR`, as `SA_RESTART` says (contract 3.11). The signal
+//! calls themselves are in `signal/`. `clone` with `CLONE_VM` (k2-03) returns `-ENOSYS`
+//! until then.
 
 mod table;
 
@@ -24,6 +26,7 @@ use self::table::*;
 use crate::cpu::{Cpu, R8, R9, R10, R11, RAX, RCX, RDI, RDX, RSI, RSP};
 use crate::loader;
 use crate::mem::{Mem, USER_END, host_prot};
+use crate::signal::{self, guest_signal, host_signal};
 use crate::sys::{
     self, AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, E2BIG, EFAULT, EINVAL, ELOOP, ENAMETOOLONG,
     ENOSYS, EPERM, MAP_ANONYMOUS, PROT_EXEC, PROT_READ, PROT_WRITE,
@@ -38,15 +41,6 @@ const ARCH_GET_GS: u64 = 0x1004;
 const PR_SET_PDEATHSIG: u64 = 1;
 const PR_SET_NAME: u64 = 15;
 const PR_GET_NAME: u64 = 16;
-// /usr/include/asm-generic/signal-defs.h
-const SIG_BLOCK: u64 = 0;
-const SIG_UNBLOCK: u64 = 1;
-const SIG_SETMASK: u64 = 2;
-const SIGKILL: u64 = 9;
-const SIGSTOP: u64 = 19;
-/// Guest signals with an action: 62–64 are reserved (contract 3.11).
-const GUEST_SIGNALS: u64 = 61;
-const UNBLOCKABLE: u64 = (1 << (SIGKILL - 1)) | (1 << (SIGSTOP - 1));
 /// `sizeof(struct robust_list_head)` on x86-64.
 const ROBUST_LIST_HEAD_SIZE: u64 = 24;
 /// Longest path read from the guest (`PATH_MAX`).
@@ -73,15 +67,6 @@ const MADV_DONTNEED: u64 = 4;
 const F_GETFD: u64 = 1;
 const FCNTL: u64 = 72;
 
-/// Guest `struct sigaction` as `rt_sigaction` takes it on x86-64.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SigAction {
-    pub handler: u64,
-    pub flags: u64,
-    pub restorer: u64,
-    pub mask: u64,
-}
-
 /// Process state the emulated calls keep.
 pub struct State {
     /// Absolute path of the guest program, what `/proc/self/exe` reads as.
@@ -90,8 +75,8 @@ pub struct State {
     calco: Vec<u8>,
     /// File named by `CALCO_LOG`, where unsupported calls are noted.
     log: Option<PathBuf>,
-    pub actions: [SigAction; GUEST_SIGNALS as usize],
-    pub sigmask: u64,
+    /// Guest signal actions.
+    pub signals: signal::Process,
     pub robust_list: (u64, u64),
     /// Set when guest code may have been unmapped, replaced or lost execute permission.
     code_changed: bool,
@@ -105,10 +90,9 @@ fn result(r: Result<u64, i32>) -> i64 {
     r.map_or_else(err, |v| v as i64)
 }
 
+/// Straight to the kernel through the safe system call (contract 3.11).
 fn pass(nr: u64, a: [u64; 6]) -> i64 {
-    let [a1, a2, a3, a4, a5, a6] = a.map(|v| v as usize);
-    // Identity mapping: guest pointers are valid as they are; the kernel checks them.
-    unsafe { sys::syscall6(nr as usize, a1, a2, a3, a4, a5, a6) as i64 }
+    signal::safe_syscall(nr, a)
 }
 
 /// Whether the guest owns `[addr, addr + len)` with read (or write) permission, so calco
@@ -131,14 +115,23 @@ pub fn accessible(mem: &Mem, addr: u64, len: u64, write: bool) -> bool {
     true
 }
 
-fn read_u64(mem: &Mem, addr: u64) -> Result<u64, i32> {
+pub fn read_u64(mem: &Mem, addr: u64) -> Result<u64, i32> {
     if !accessible(mem, addr, 8, false) {
         return Err(EFAULT);
     }
     Ok(unsafe { (addr as *const u64).read_unaligned() })
 }
 
-fn write_bytes(mem: &Mem, addr: u64, bytes: &[u8]) -> Result<(), i32> {
+pub fn read_bytes(mem: &Mem, addr: u64, len: u64) -> Result<Vec<u8>, i32> {
+    if !accessible(mem, addr, len, false) {
+        return Err(EFAULT);
+    }
+    let mut out = vec![0u8; len as usize];
+    unsafe { core::ptr::copy_nonoverlapping(addr as *const u8, out.as_mut_ptr(), out.len()) };
+    Ok(out)
+}
+
+pub fn write_bytes(mem: &Mem, addr: u64, bytes: &[u8]) -> Result<(), i32> {
     if !accessible(mem, addr, bytes.len() as u64, true) {
         return Err(EFAULT);
     }
@@ -221,15 +214,6 @@ pub fn reexec_argv(calco: &[u8], path: &[u8], argv: &[Vec<u8>]) -> Vec<Vec<u8>> 
     out
 }
 
-/// Guest number of host signal `sig`: 64 and 63 go back to 32 and 33.
-pub fn guest_signal(sig: u32) -> u32 {
-    match sig {
-        64 => 32,
-        63 => 33,
-        s => s,
-    }
-}
-
 /// `wait4` status as the guest sees it: the terminating or stopping signal translated,
 /// the rest (exit code, core flag, ptrace event) as it is.
 pub fn guest_wait_status(status: u32) -> u32 {
@@ -251,17 +235,6 @@ pub fn guest_waitid_status(code: i32, status: i32) -> i32 {
     }
 }
 
-/// Host number of guest signal `sig` (contract 3.11): 32 and 33 move to 64 and 63; 0 is
-/// the existence check; 62–64 are not available.
-pub fn host_signal(sig: u64) -> Option<u64> {
-    match sig {
-        0..=31 | 34..=61 => Some(sig),
-        32 => Some(64),
-        33 => Some(63),
-        _ => None,
-    }
-}
-
 fn gettid() -> u64 {
     unsafe { sys::syscall0(sys::SYS_GETTID) as u64 }
 }
@@ -272,8 +245,7 @@ impl State {
             exe,
             calco,
             log,
-            actions: [SigAction::default(); GUEST_SIGNALS as usize],
-            sigmask: 0,
+            signals: signal::Process::new(),
             robust_list: (0, 0),
             code_changed: false,
         }
@@ -341,8 +313,15 @@ impl State {
             // glibc turns rseq off and falls back from clone3 to clone.
             RSEQ | CLONE3 => err(ENOSYS),
             EXIT | EXIT_GROUP => pass(nr, a),
-            RT_SIGACTION => self.sigaction(mem, a[0], a[1], a[2], a[3]),
-            RT_SIGPROCMASK => self.sigprocmask(mem, a[0], a[1], a[2], a[3]),
+            RT_SIGACTION => self.signals.sigaction(cpu, mem, a),
+            RT_SIGPROCMASK => signal::sigprocmask(cpu, mem, a[0], a[1], a[2], a[3]),
+            RT_SIGPENDING => signal::sigpending(cpu, mem, a[0], a[1]),
+            RT_SIGSUSPEND => signal::sigsuspend(cpu, mem, a[0], a[1]),
+            RT_SIGTIMEDWAIT => signal::sigtimedwait(cpu, mem, a),
+            RT_SIGQUEUEINFO | RT_TGSIGQUEUEINFO => signal::sigqueueinfo(mem, nr, a),
+            SIGALTSTACK => signal::sigaltstack(cpu, mem, a[0], a[1]),
+            SIGNALFD4 => signal::signalfd4(mem, nr, a),
+            TIMER_CREATE => signal::timer_create(mem, nr, a),
             KILL | TKILL => match host_signal(a[1]) {
                 Some(sig) => pass(nr, [a[0], sig, 0, 0, 0, 0]),
                 None => err(EINVAL),
@@ -431,67 +410,6 @@ impl State {
         }
     }
 
-    fn sigaction(&mut self, mem: &Mem, sig: u64, act: u64, oact: u64, size: u64) -> i64 {
-        if size != 8 || !(1..=GUEST_SIGNALS).contains(&sig) {
-            return err(EINVAL);
-        }
-        let new = if act != 0 {
-            let field = |i: u64| read_u64(mem, act + 8 * i);
-            let action: Result<SigAction, i32> = (|| {
-                Ok(SigAction {
-                    handler: field(0)?,
-                    flags: field(1)?,
-                    restorer: field(2)?,
-                    mask: field(3)? & !UNBLOCKABLE,
-                })
-            })();
-            match action {
-                Ok(_) if sig == SIGKILL || sig == SIGSTOP => return err(EINVAL),
-                Ok(action) => Some(action),
-                Err(e) => return err(e),
-            }
-        } else {
-            None
-        };
-        let slot = &mut self.actions[sig as usize - 1];
-        let old = *slot;
-        if let Some(action) = new {
-            *slot = action;
-        }
-        if oact != 0 {
-            let words = [old.handler, old.flags, old.restorer, old.mask];
-            let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-            if let Err(e) = write_bytes(mem, oact, &bytes) {
-                return err(e);
-            }
-        }
-        0
-    }
-
-    fn sigprocmask(&mut self, mem: &Mem, how: u64, set: u64, oset: u64, size: u64) -> i64 {
-        if size != 8 {
-            return err(EINVAL);
-        }
-        let old = self.sigmask;
-        if set != 0 {
-            let s = match read_u64(mem, set) {
-                Ok(s) => s,
-                Err(e) => return err(e),
-            };
-            let new = match how {
-                SIG_BLOCK => old | s,
-                SIG_UNBLOCK => old & !s,
-                SIG_SETMASK => s,
-                _ => return err(EINVAL),
-            };
-            self.sigmask = new & !UNBLOCKABLE;
-        }
-        if oset != 0 {
-            return result(write_u64(mem, oset, old).map(|()| 0));
-        }
-        0
-    }
-
     /// `execve` of `path`: if the kernel would run it, calco runs itself again on it with
     /// the guest environment (descriptors stay as they are); otherwise the guest gets the
     /// errno the kernel gives and goes on.
@@ -527,7 +445,11 @@ impl State {
         };
         let dirfd = dirfd as i32;
         let relative = !path.starts_with(b"/") && dirfd != AT_FDCWD;
-        if relative && pass(FCNTL, [dirfd as u64, F_GETFD, 0, 0, 0, 0]) < 0 {
+        // calco's own check, not the guest's call: a pending signal must not make it fail.
+        if relative
+            && unsafe { sys::syscall2(FCNTL as usize, dirfd as isize as usize, F_GETFD as usize) }
+                < 0
+        {
             return err(sys::EBADF);
         }
         let full = if !relative {
@@ -588,6 +510,8 @@ fn fork(cpu: &mut Cpu, flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64) -
     let args = [host_flags, 0, ptid, ctid, 0, 0];
     let ret = pass(sys::SYS_CLONE as u64, args);
     if ret == 0 {
+        // As in the kernel, the child starts with no pending signals.
+        signal::forked(cpu);
         cpu.tid = gettid();
         if stack != 0 {
             cpu.gpr[RSP] = stack;
@@ -623,8 +547,15 @@ fn arch_prctl(cpu: &mut Cpu, mem: &Mem, code: u64, addr: u64) -> i64 {
 /// Serves the `syscall` the guest just executed; `cpu.rip` is already past it.
 pub fn handle(cpu: &mut Cpu, mem: &mut Mem, state: &mut State) {
     let nr = cpu.gpr[RAX];
+    if nr == RT_SIGRETURN {
+        // The whole state comes from the frame, RCX and R11 included.
+        state.signals.sigreturn(cpu, mem);
+        return;
+    }
     let args = [RDI, RSI, RDX, R10, R8, R9].map(|r| cpu.gpr[r]);
     let ret = state.dispatch(cpu, mem, nr, args);
+    // An interrupted call waits for `signal::deliver` to restart it or leave EINTR.
+    let ret = signal::note_result(cpu, nr, ret);
     cpu.gpr[RAX] = ret as u64;
     // What the `syscall` instruction leaves: the return address in RCX, RFLAGS in R11.
     cpu.gpr[RCX] = cpu.rip;

@@ -38,6 +38,7 @@ pub const ARCH_PRCTL: u64 = 158;
 pub const GETTID: u64 = 186;
 pub const TKILL: u64 = 200;
 pub const SET_TID_ADDRESS: u64 = 218;
+pub const TIMER_CREATE: u64 = 222;
 pub const WAITID: u64 = 247;
 pub const EXIT_GROUP: u64 = 231;
 pub const TGKILL: u64 = 234;
@@ -52,7 +53,8 @@ pub const CLONE3: u64 = 435;
 
 /// Emulated calls. `prctl` passes only for the options the contract names; `readlink`
 /// and `readlinkat` pass except for `/proc/self/exe`; `wait4`, `waitid` and `madvise`
-/// pass and then translate the signal of a wait status or drop stale translations.
+/// pass and then translate the signal of a wait status or drop stale translations;
+/// `timer_create` passes with the signal of its `sigevent` translated.
 pub const EMULATED: &[(u64, &str)] = &[
     (MMAP, "mmap"),
     (MPROTECT, "mprotect"),
@@ -87,6 +89,7 @@ pub const EMULATED: &[(u64, &str)] = &[
     (SET_ROBUST_LIST, "set_robust_list"),
     (GET_ROBUST_LIST, "get_robust_list"),
     (SIGNALFD4, "signalfd4"),
+    (TIMER_CREATE, "timer_create"),
     (RT_TGSIGQUEUEINFO, "rt_tgsigqueueinfo"),
     (EXECVEAT, "execveat"),
     (RSEQ, "rseq"),
@@ -237,7 +240,6 @@ pub const PASS: &[(u64, &str)] = &[
     (37, "alarm"),
     (38, "setitimer"),
     (36, "getitimer"),
-    (222, "timer_create"),
     (223, "timer_settime"),
     (224, "timer_gettime"),
     (226, "timer_delete"),
