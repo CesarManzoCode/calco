@@ -9,7 +9,7 @@
 
 mod table;
 
-pub use self::table::{EMULATED, Kind, PASS, classify};
+pub use self::table::{Kind, classify};
 
 use std::fs::OpenOptions;
 use std::io::Write;

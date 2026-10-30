@@ -19,8 +19,9 @@ CASES = 20_000
 
 def load():
     """[(feature, description)] of harness/mutants.tsv."""
-    lines = MUTANTS.read_text().splitlines()[1:]
-    return [tuple(line.split("\t", 1)) for line in lines if line.strip()]
+    lines = MUTANTS.read_text().splitlines()
+    return [tuple(line.split("\t", 1)) for line in lines
+            if line.strip() and not line.startswith("#")]
 
 
 def name(feature):

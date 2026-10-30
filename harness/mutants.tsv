@@ -1,4 +1,4 @@
-feature	description
+# feature	description
 mutant-adc-carry	ADC (10–15) se emite como ADD (00–05): se pierde el acarreo de entrada
 mutant-shift-flags	tras SHL/SHR/SAR se emite cmc: CF queda invertido
 mutant-movsxd	MOVSXD se emite como MOV de 32 bits: el resultado se extiende con ceros

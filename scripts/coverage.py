@@ -32,6 +32,8 @@ PREFIXES = {"lock", "rep", "repz", "repnz", "repe", "repne", "data16", "data32",
 SUFFIXES = ("64", "b", "w", "l", "d", "q")
 SYMBOL = re.compile(r"^[0-9a-f]+ <([^>]+)>:$")
 CASE = re.compile(r"case_\d+")
+# objdump prints CMPPS/CMPSS/CMPPD/CMPSD with imm8 0-7 as their predicate alias.
+CMP_PREDICATE = re.compile(r"cmp(?:eq|lt|le|unord|neq|nlt|nle|ord)(ps|ss|pd|sd)")
 
 
 def normalize(text, scope):
@@ -40,6 +42,8 @@ def normalize(text, scope):
     if not words:
         return None
     mn = words[0]
+    if m := CMP_PREDICATE.fullmatch(mn):
+        mn = "cmp" + m[1]
     if mn in scope:
         return mn
     for suffix in SUFFIXES:

@@ -89,7 +89,8 @@ impl BlockMap {
 
     fn insert(&mut self, rip: u64, block: u32) {
         if 2 * (self.len + 1) > self.slots.len() {
-            let old = std::mem::replace(&mut self.slots, vec![(0, 0); 2 * self.slots.len()]);
+            let grown = vec![(0, 0); 2 * self.slots.len()];
+            let old = std::mem::replace(&mut self.slots, grown);
             self.len = 0;
             for (r, b) in old {
                 if r != 0 {
@@ -167,7 +168,7 @@ impl Jit {
         // Exit thunk: the trampoline is in calco's text, too far for a rel32.
         let exit_thunk = asm.pc();
         asm.jmp_rip_mem(0);
-        asm.data_u64(trampoline::exit_trampoline as usize as u64);
+        asm.data_u64(trampoline::exit_trampoline as *const () as u64);
         asm.align(BLOCK_ALIGN);
         let indirect_exit = asm.pc();
         asm.mov_gs_dword(OFF_EXIT_REASON, EXIT_INDIRECT);
