@@ -231,9 +231,11 @@ Todos los scripts se corren como `python3 scripts/<nombre>.py` desde la raíz de
 | TCC | `tcc_selfcompile.py`: deja `build/tcc/tcc1.native` y `build/tcc/tcc1.calco`, mismo sha256 | K3 |
 | Rendimiento, metadatos, RSS | `bench.py`: imprime `calco/qemu: <x>` y `calco/nativo: <y>`; escribe `build/bench/results.json` | K3 |
 | Sin root | `common.require_non_root()` en cada script | K1, K3 |
-| Arnés menor que traductor | `loc.py`: imprime `traductor: <a>` y `verificacion: <b>`; falla si `b >= a` | K1 |
+| Arnés menor que traductor | `loc.py`: imprime `traductor: <a>` y `verificacion: <b>`; falla si `b >= a` | K2 (diferido desde K1) |
 
 Reglas de conteo de `loc.py` (las mismas que usa el checker): se cuentan líneas no vacías que no sean solo comentario (`//`, `#`, `/* … */` de una línea). Traductor = `src/**/*.rs` salvo archivos `tests.rs`. Verificación = `harness/**`, `scripts/**`, `guests/**`, `tests/**`, `src/**/tests.rs` (`.py`, `.rs`, `.c`, `.S`, `.s`, `.sh`). Las tablas `.tsv` y las entradas de `targets/` no cuentan.
+
+- [diseño] **`k1.loc` diferido a K2** (2026-10-30, registrado en `CHANGELOG.md`). Al cerrar K1, `python3 scripts/loc.py` dio `traductor: 3927` y `verificacion: 4450`, así que el criterio no se cumple en K1. No se reduce la verificación ni cambian las reglas de conteo de arriba. K2 es el primer K que añade al traductor `execve` (k2-01), señales (k2-02) e hilos (k2-03). Condición de reapertura: verificación < traductor, medido con `scripts/loc.py`, cuando el traductor ya cubra señales, hilos y `execve`.
 
 Casos de señales (`guests/signals.c`): SIGSEGV por escritura a una página sin permiso con un manejador `SA_SIGINFO` que imprime `si_addr`, el `rip` del `ucontext` como desplazamiento respecto a una etiqueta y cuatro registros fijados antes, corrige el contexto (salta la instrucción) y continúa; SIGILL por `ud2`; SIGFPE por división entera entre cero; SIGALRM de `setitimer` en mitad de un bucle de solo registros que mantiene un invariante: el manejador imprime si el `rip` cae dentro del bucle y si el invariante se cumple, no los valores (que dependen del momento).
 
