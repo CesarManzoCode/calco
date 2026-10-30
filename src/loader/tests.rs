@@ -240,3 +240,74 @@ fn resolve_rewrites_a_script_into_its_interpreter() {
         [b"/bin/sh".to_vec(), b"-e".to_vec(), script, b"arg".to_vec()]
     );
 }
+
+const LD_SO: &[u8] = b"/lib64/ld-linux-x86-64.so.2\0";
+
+/// `minimal_elf` turned into a PIE with a `PT_INTERP` naming `LD_SO`, appended at the end.
+fn dynamic_elf() -> Vec<u8> {
+    let mut b = minimal_elf();
+    b[16..18].copy_from_slice(&ET_DYN.to_le_bytes());
+    b[56..58].copy_from_slice(&2u16.to_le_bytes());
+    let at = EHDR_SIZE + PHDR_SIZE;
+    let mut interp = b[EHDR_SIZE..at].to_vec();
+    interp[..4].copy_from_slice(&PT_INTERP.to_le_bytes());
+    interp[4..8].copy_from_slice(&PF_R.to_le_bytes());
+    let off = (b.len() + PHDR_SIZE) as u64;
+    interp[8..16].copy_from_slice(&off.to_le_bytes());
+    interp[32..40].copy_from_slice(&(LD_SO.len() as u64).to_le_bytes());
+    interp[40..48].copy_from_slice(&(LD_SO.len() as u64).to_le_bytes());
+    b.splice(at..at, interp);
+    b.extend_from_slice(LD_SO);
+    b
+}
+
+#[test]
+fn places_et_dyn_at_the_dyn_base() {
+    let elf = parse(&dynamic_elf()).unwrap();
+    assert_eq!(elf.e_type, ET_DYN);
+    assert_eq!(elf.span().0, VADDR);
+    let bias = load_bias(&elf, DYN_BASE);
+    assert_eq!(elf.span().0 + bias, DYN_BASE);
+    assert_eq!(load_bias(&parse(&minimal_elf()).unwrap(), DYN_BASE), 0);
+}
+
+#[test]
+fn auxv_of_an_executable_with_interpreter() {
+    let b = dynamic_elf();
+    let elf = parse(&b).unwrap();
+    assert!(elf.has_interp());
+    let path = std::env::current_exe()
+        .unwrap()
+        .with_file_name("calco-k2-05-interp");
+    std::fs::write(&path, &b).unwrap();
+    let interp = interp_path(&File::open(&path).unwrap(), &elf).unwrap();
+    assert_eq!(interp, Some(PathBuf::from("/lib64/ld-linux-x86-64.so.2")));
+
+    let base = 0x0000_1000_5000_0000;
+    let bias = load_bias(&elf, DYN_BASE);
+    let aux = aux_for(&elf, bias, base);
+    assert_eq!(
+        aux.phdr,
+        DYN_BASE + EHDR_SIZE as u64,
+        "AT_PHDR from e_phoff"
+    );
+    assert_eq!(aux.phnum, 2);
+    assert_eq!(aux.entry, DYN_BASE + 120, "AT_ENTRY is the executable's");
+    let img = build_stack(
+        crate::mem::STACK_TOP,
+        &strings(&["p"]),
+        &[],
+        b"p",
+        [0; 16],
+        &aux,
+    );
+    let mut p = img.rsp + 8 * 4;
+    let mut seen = Vec::new();
+    while word(&img, p) != AT_NULL {
+        seen.push((word(&img, p), word(&img, p + 8)));
+        p += 16;
+    }
+    assert!(seen.contains(&(AT_BASE, base)));
+    assert!(seen.contains(&(AT_ENTRY, DYN_BASE + 120)));
+    assert!(seen.contains(&(AT_PHDR, DYN_BASE + 64)));
+}

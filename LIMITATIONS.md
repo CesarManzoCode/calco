@@ -30,6 +30,7 @@ Fuente única de lo que calco no demuestra o no hace. Ningún otro archivo los r
 - `MAP_FIXED` sobre memoria de calco devuelve `ENOMEM`; `brk` está limitado a 1 GiB.
 - `/proc/self/maps` del invitado muestra el mapa de calco, no uno filtrado.
 - No se entrega vDSO al invitado; las llamadas de tiempo van al kernel.
+- Los programas dinámicos usan el intérprete y las bibliotecas del anfitrión que nombre su `PT_INTERP`; no hay raíz alternativa del invitado (como `-L` de qemu-user).
 - Las señales 62–64 del invitado no están disponibles; la 62 del anfitrión la usa calco.
 - `vfork` se emula como `fork`; `clone` con `CLONE_VM` sin `CLONE_THREAD` no está soportado.
 - Un hilo (`clone` con `CLONE_THREAD`) tiene que pedir `CLONE_VM`, `CLONE_FS`, `CLONE_FILES` y `CLONE_SIGHAND`, porque un hilo del anfitrión comparte todo eso siempre; solo puede añadir `CLONE_SYSVSEM`, `CLONE_SETTLS`, `CLONE_PARENT_SETTID`, `CLONE_CHILD_SETTID`, `CLONE_CHILD_CLEARTID` y `CLONE_DETACHED`. Cualquier otra combinación devuelve `EINVAL`, aunque el kernel la aceptaría.

@@ -1,7 +1,5 @@
-//! ELF loader: static `ET_EXEC` and `ET_DYN` executables, `#!` scripts, `brk` start and
-//! the initial stack.
-//!
-//! Executables with `PT_INTERP` are rejected until the interpreter is supported (K2).
+//! ELF loader: `ET_EXEC` and `ET_DYN` executables, their `PT_INTERP` interpreter, `#!`
+//! scripts, `brk` start and the initial stack.
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -13,7 +11,8 @@ use std::path::{Path, PathBuf};
 
 use crate::mem::{DYN_BASE, Mem, PAGE_SIZE, STACK_SIZE, USER_END, page_down, page_up};
 use crate::sys::{
-    self, EACCES, ELOOP, ENOEXEC, MAP_FIXED, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE,
+    self, EACCES, ELOOP, ENOEXEC, MAP_FIXED, MAP_NORESERVE, MAP_PRIVATE, PROT_EXEC, PROT_NONE,
+    PROT_READ, PROT_WRITE,
 };
 
 // /usr/include/elf.h
@@ -63,6 +62,8 @@ const PLATFORM: &[u8] = b"x86_64\0";
 pub const BINPRM_BUF_SIZE: usize = 256;
 /// Format rewrites the kernel follows before `ELOOP` (`exec_binprm` in fs/exec.c).
 const MAX_EXEC_DEPTH: usize = 5;
+/// `PATH_MAX`: the kernel refuses a longer `PT_INTERP` (`load_elf_binary`).
+const MAX_INTERP: u64 = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Phdr {
@@ -90,6 +91,60 @@ impl Elf {
 
     fn loads(&self) -> impl Iterator<Item = &Phdr> {
         self.phdrs.iter().filter(|p| p.p_type == PT_LOAD)
+    }
+
+    /// Page-aligned `[low, high)` of the `PT_LOAD` segments, before relocation.
+    pub fn span(&self) -> (u64, u64) {
+        let low = self.loads().map(|p| p.p_vaddr).min().unwrap_or(0);
+        let high = self
+            .loads()
+            .map(|p| p.p_vaddr + p.p_memsz)
+            .max()
+            .unwrap_or(0);
+        (page_down(low), page_up(high))
+    }
+
+    /// Largest `p_align` of the `PT_LOAD` segments that is a power of two, at least a page.
+    fn align(&self) -> u64 {
+        self.loads()
+            .map(|p| p.p_align)
+            .filter(|a| a.is_power_of_two())
+            .fold(PAGE_SIZE, u64::max)
+    }
+
+    /// Address of the program headers once loaded with `bias`: `PT_PHDR`, or the
+    /// `PT_LOAD` that holds `e_phoff` in the file.
+    pub fn phdr_addr(&self, bias: u64) -> u64 {
+        match self.phdrs.iter().find(|p| p.p_type == PT_PHDR) {
+            Some(p) => p.p_vaddr + bias,
+            None => self
+                .loads()
+                .find(|p| p.p_offset <= self.phoff && self.phoff < p.p_offset + p.p_filesz)
+                .map(|p| p.p_vaddr + (self.phoff - p.p_offset) + bias)
+                .unwrap_or(0),
+        }
+    }
+}
+
+/// Bias that places an `ET_DYN` image so its lowest page lands on `base`; `ET_EXEC`
+/// images stay at their `p_vaddr`.
+pub fn load_bias(elf: &Elf, base: u64) -> u64 {
+    if elf.e_type == ET_DYN {
+        base.wrapping_sub(elf.span().0)
+    } else {
+        0
+    }
+}
+
+/// Values of the auxiliary vector that depend on what was loaded: program headers and
+/// entry of the executable, load address of the interpreter (0 without one).
+pub fn aux_for(exe: &Elf, exe_bias: u64, interp_base: u64) -> AuxInfo {
+    AuxInfo {
+        phdr: exe.phdr_addr(exe_bias),
+        phnum: exe.phdrs.len() as u64,
+        entry: exe.entry + exe_bias,
+        base: interp_base,
+        ..AuxInfo::default()
     }
 }
 
@@ -371,6 +426,76 @@ fn map_segment(mem: &mut Mem, fd: i32, ph: &Phdr, bias: u64) -> Result<(), i32> 
     Ok(())
 }
 
+/// Maps every `PT_LOAD` of `elf` with `bias` and returns the end of the highest one.
+fn map_image(mem: &mut Mem, file: &File, elf: &Elf, bias: u64, name: &str) -> Result<u64, String> {
+    let mut high = 0;
+    for ph in elf.loads() {
+        let end = ph.p_vaddr.wrapping_add(bias).checked_add(ph.p_memsz);
+        let end = end.filter(|&e| e <= USER_END);
+        let end = end.ok_or_else(|| format!("{name}: segment outside the user address space"))?;
+        map_segment(mem, file.as_raw_fd(), ph, bias).map_err(|e| {
+            format!(
+                "{name}: cannot map segment at {:#x}: {}",
+                ph.p_vaddr.wrapping_add(bias),
+                os_err(e)
+            )
+        })?;
+        high = high.max(end);
+    }
+    Ok(high)
+}
+
+/// Path named by `PT_INTERP`, without its NUL.
+fn interp_path(file: &File, elf: &Elf) -> Result<Option<PathBuf>, String> {
+    let Some(ph) = elf.phdrs.iter().find(|p| p.p_type == PT_INTERP) else {
+        return Ok(None);
+    };
+    if ph.p_filesz < 2 || ph.p_filesz > MAX_INTERP {
+        return Err("bad PT_INTERP size".into());
+    }
+    let mut buf = vec![0; ph.p_filesz as usize];
+    file.read_exact_at(&mut buf, ph.p_offset)
+        .map_err(|e| format!("PT_INTERP: {e}"))?;
+    match buf.pop() {
+        Some(0) if !buf.contains(&0) => Ok(Some(PathBuf::from(OsString::from_vec(buf)))),
+        _ => Err("PT_INTERP is not a NUL-terminated path".into()),
+    }
+}
+
+/// Loads the interpreter in the placement window, aligned to its largest `p_align`, with
+/// the holes between its segments kept reserved for it. Returns its ELF and bias.
+fn load_interp(mem: &mut Mem, path: &Path) -> Result<(Elf, u64), String> {
+    let name = path.display().to_string();
+    let file = File::open(path).map_err(|e| format!("{name}: {e}"))?;
+    let image = read_head(&file).map_err(|e| format!("{name}: {e}"))?;
+    let elf = parse(&image).map_err(|e| format!("{name}: {e}"))?;
+    if elf.has_interp() {
+        return Err(format!("{name}: the interpreter asks for an interpreter"));
+    }
+    let (low, high) = elf.span();
+    let bias = if elf.e_type == ET_DYN {
+        let (span, align) = (high - low, elf.align());
+        let flags = MAP_PRIVATE | MAP_NORESERVE;
+        let placed = mem
+            .map_anon(0, span + align - PAGE_SIZE, PROT_NONE, flags)
+            .map_err(|e| format!("{name}: no room in the placement window: {}", os_err(e)))?;
+        let start = placed.next_multiple_of(align);
+        let trims = [
+            (placed, start),
+            (start + span, placed + span + align - PAGE_SIZE),
+        ];
+        for (s, e) in trims.into_iter().filter(|(s, e)| e > s) {
+            mem.unmap(s, e - s)
+                .map_err(|e| format!("{name}: {}", os_err(e)))?;
+        }
+        start - low
+    } else {
+        0
+    };
+    map_image(mem, &file, &elf, bias, &name)?;
+    Ok((elf, bias))
+}
+
 /// The start of `file`: what the kernel reads to tell the format, extended to the whole
 /// program header table of an ELF.
 fn read_head(file: &File) -> io::Result<Vec<u8>> {
@@ -460,9 +585,10 @@ pub fn resolve(path: &Path, mut argv: Vec<Vec<u8>>) -> Result<(PathBuf, Vec<Vec<
     Err(ELOOP)
 }
 
-/// Loads a static executable into `mem`, reserves the code cache, maps the stack and writes
-/// the initial stack. `execfn` is the path `AT_EXECFN` names (the script for `#!`);
-/// `hwcap` is the already filtered CPUID.1:EDX.
+/// Loads an executable into `mem` (and its `PT_INTERP` interpreter, which then is where the
+/// guest starts), reserves the code cache, maps the stack and writes the initial stack.
+/// `execfn` is the path `AT_EXECFN` names (the script for `#!`); `hwcap` is the already
+/// filtered CPUID.1:EDX.
 pub fn load(
     path: &Path,
     execfn: &[u8],
@@ -471,38 +597,14 @@ pub fn load(
     envp: &[Vec<u8>],
     hwcap: u64,
 ) -> Result<Loaded, String> {
-    let name = path.display();
+    let name = path.display().to_string();
     let file = File::open(path).map_err(|e| format!("{name}: {e}"))?;
     let image = read_head(&file).map_err(|e| format!("{name}: {e}"))?;
     let elf = parse(&image).map_err(|e| format!("{name}: {e}"))?;
-    if elf.has_interp() {
-        return Err(format!(
-            "{name}: dynamically linked programs (PT_INTERP) are not supported yet"
-        ));
-    }
+    let interp = interp_path(&file, &elf).map_err(|e| format!("{name}: {e}"))?;
 
-    let bias = if elf.e_type == ET_DYN {
-        let low = elf.loads().map(|p| p.p_vaddr).min().unwrap_or(0);
-        DYN_BASE - page_down(low)
-    } else {
-        0
-    };
-    let fd = file.as_raw_fd();
-    let mut high = 0;
-    for ph in elf.loads() {
-        let end = ph.p_vaddr + bias + ph.p_memsz;
-        if end > USER_END {
-            return Err(format!("{name}: segment outside the user address space"));
-        }
-        map_segment(mem, fd, ph, bias).map_err(|e| {
-            format!(
-                "{name}: cannot map segment at {:#x}: {}",
-                ph.p_vaddr + bias,
-                os_err(e)
-            )
-        })?;
-        high = high.max(end);
-    }
+    let bias = load_bias(&elf, DYN_BASE);
+    let high = map_image(mem, &file, &elf, bias, &name)?;
     drop(file);
 
     let brk = page_up(high);
@@ -510,26 +612,23 @@ pub fn load(
     mem.reserve_code_cache()
         .map_err(|e| format!("cannot reserve the code cache: {}", os_err(e)))?;
 
-    let phdr = match elf.phdrs.iter().find(|p| p.p_type == PT_PHDR) {
-        Some(p) => p.p_vaddr + bias,
-        None => elf
-            .loads()
-            .find(|p| p.p_offset <= elf.phoff && elf.phoff < p.p_offset + p.p_filesz)
-            .map(|p| p.p_vaddr + (elf.phoff - p.p_offset) + bias)
-            .unwrap_or(0),
+    // The interpreter goes in the placement window, which exists once `brk` is fixed.
+    let (start, interp_base) = match interp {
+        Some(ipath) => {
+            let (ielf, ibias) = load_interp(mem, &ipath)?;
+            (ielf.entry + ibias, ielf.span().0 + ibias)
+        }
+        None => (elf.entry + bias, 0),
     };
-    let entry = elf.entry + bias;
     let aux = AuxInfo {
-        phdr,
-        phnum: elf.phdrs.len() as u64,
-        entry,
-        base: 0,
         uid: sys::getuid(),
         euid: sys::geteuid(),
         gid: sys::getgid(),
         egid: sys::getegid(),
         hwcap,
+        ..aux_for(&elf, bias, interp_base)
     };
+    let phdr = aux.phdr;
     let mut random = [0u8; 16];
     sys::getrandom(&mut random).map_err(|e| format!("getrandom: {}", os_err(e)))?;
 
@@ -549,7 +648,7 @@ pub fn load(
         )
     };
     Ok(Loaded {
-        entry,
+        entry: start,
         rsp: stack.rsp,
         brk,
         phdr,
