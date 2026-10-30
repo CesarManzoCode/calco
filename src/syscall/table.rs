@@ -19,11 +19,13 @@ pub const RT_SIGACTION: u64 = 13;
 pub const RT_SIGPROCMASK: u64 = 14;
 pub const RT_SIGRETURN: u64 = 15;
 pub const MREMAP: u64 = 25;
+pub const MADVISE: u64 = 28;
 pub const CLONE: u64 = 56;
 pub const FORK: u64 = 57;
 pub const VFORK: u64 = 58;
 pub const EXECVE: u64 = 59;
 pub const EXIT: u64 = 60;
+pub const WAIT4: u64 = 61;
 pub const KILL: u64 = 62;
 pub const READLINK: u64 = 89;
 pub const RT_SIGPENDING: u64 = 127;
@@ -36,6 +38,7 @@ pub const ARCH_PRCTL: u64 = 158;
 pub const GETTID: u64 = 186;
 pub const TKILL: u64 = 200;
 pub const SET_TID_ADDRESS: u64 = 218;
+pub const WAITID: u64 = 247;
 pub const EXIT_GROUP: u64 = 231;
 pub const TGKILL: u64 = 234;
 pub const READLINKAT: u64 = 267;
@@ -48,7 +51,8 @@ pub const RSEQ: u64 = 334;
 pub const CLONE3: u64 = 435;
 
 /// Emulated calls. `prctl` passes only for the options the contract names; `readlink`
-/// and `readlinkat` pass except for `/proc/self/exe`.
+/// and `readlinkat` pass except for `/proc/self/exe`; `wait4`, `waitid` and `madvise`
+/// pass and then translate the signal of a wait status or drop stale translations.
 pub const EMULATED: &[(u64, &str)] = &[
     (MMAP, "mmap"),
     (MPROTECT, "mprotect"),
@@ -58,11 +62,13 @@ pub const EMULATED: &[(u64, &str)] = &[
     (RT_SIGPROCMASK, "rt_sigprocmask"),
     (RT_SIGRETURN, "rt_sigreturn"),
     (MREMAP, "mremap"),
+    (MADVISE, "madvise"),
     (CLONE, "clone"),
     (FORK, "fork"),
     (VFORK, "vfork"),
     (EXECVE, "execve"),
     (EXIT, "exit"),
+    (WAIT4, "wait4"),
     (KILL, "kill"),
     (READLINK, "readlink"),
     (RT_SIGPENDING, "rt_sigpending"),
@@ -74,6 +80,7 @@ pub const EMULATED: &[(u64, &str)] = &[
     (ARCH_PRCTL, "arch_prctl"),
     (TKILL, "tkill"),
     (SET_TID_ADDRESS, "set_tid_address"),
+    (WAITID, "waitid"),
     (EXIT_GROUP, "exit_group"),
     (TGKILL, "tgkill"),
     (READLINKAT, "readlinkat"),
@@ -227,8 +234,6 @@ pub const PASS: &[(u64, &str)] = &[
     (201, "time"),
     (318, "getrandom"),
     (202, "futex"),
-    (61, "wait4"),
-    (247, "waitid"),
     (37, "alarm"),
     (38, "setitimer"),
     (36, "getitimer"),
@@ -240,7 +245,6 @@ pub const PASS: &[(u64, &str)] = &[
     (149, "mlock"),
     (150, "munlock"),
     (27, "mincore"),
-    (28, "madvise"),
     (26, "msync"),
     (294, "inotify_init1"),
     (254, "inotify_add_watch"),

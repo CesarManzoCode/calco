@@ -200,3 +200,43 @@ fn stack_layout() {
         assert!(p <= top);
     }
 }
+
+#[test]
+fn shebang_line_parses_like_the_kernel() {
+    let sh = || b"/bin/sh".to_vec();
+    assert_eq!(parse_shebang(b"#!/bin/sh\necho"), Ok((sh(), None)));
+    assert_eq!(parse_shebang(b"#!/bin/sh"), Ok((sh(), None)));
+    let env = parse_shebang(b"#! /usr/bin/env  python3 -u \t\nx");
+    assert_eq!(
+        env,
+        Ok((b"/usr/bin/env".to_vec(), Some(b"python3 -u".to_vec())))
+    );
+    assert_eq!(parse_shebang(b"#!  \t\n"), Err(ENOEXEC));
+    let cut = [b"#!/".as_slice(), &[b'a'; 300]].concat();
+    assert_eq!(
+        parse_shebang(&cut),
+        Err(ENOEXEC),
+        "interpreter cut at 256 bytes"
+    );
+}
+
+#[test]
+fn resolve_rewrites_a_script_into_its_interpreter() {
+    let dir = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let script = dir.join("calco-k2-01-resolve");
+    std::fs::write(&script, "#!/bin/sh -e\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let argv = vec![b"name".to_vec(), b"arg".to_vec()];
+    let (path, argv) = resolve(&script, argv).unwrap();
+    assert_eq!(path, Path::new("/bin/sh"));
+    let script = script.as_os_str().as_bytes().to_vec();
+    assert_eq!(
+        argv,
+        [b"/bin/sh".to_vec(), b"-e".to_vec(), script, b"arg".to_vec()]
+    );
+}

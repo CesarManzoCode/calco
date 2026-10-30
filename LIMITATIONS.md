@@ -32,6 +32,9 @@ Fuente única de lo que calco no demuestra o no hace. Ningún otro archivo los r
 - No se entrega vDSO al invitado; las llamadas de tiempo van al kernel.
 - Las señales 62–64 del invitado no están disponibles; la 62 del anfitrión la usa calco.
 - `vfork` se emula como `fork`; `clone` con `CLONE_VM` sin `CLONE_THREAD` no está soportado.
+- `execve` comprueba antes de reemplazar el proceso lo que el kernel comprueba del archivo (existencia, permiso de ejecución, archivo regular, formato y cadena de `#!`); si el calco nuevo falla después al cargar el programa, termina con código 125 en lugar de devolver el errno al invitado.
+- `execveat` relativo a un descriptor o con `AT_EMPTY_PATH` pasa la ruta como `/proc/self/fd/N`: si el descriptor tiene `O_CLOEXEC`, el calco nuevo ya no puede abrirlo y termina con código 125.
+- `execve` no lleva al programa nuevo la máscara de señales ni las señales ignoradas del invitado.
 - Un hilo que está ejecutando un bloque cuando otro hilo modifica ese código lo termina con la versión vieja.
 - Llamadas al sistema fuera de la lista del contrato devuelven `ENOSYS`.
 - `mremap` con `MREMAP_DONTUNMAP` devuelve `EINVAL`, y solo acepta rangos dentro de un único intervalo del invitado.

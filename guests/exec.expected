@@ -1,0 +1,3 @@
+parent avx=0
+child avx=0
+child exit=7

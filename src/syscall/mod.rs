@@ -3,23 +3,30 @@
 //! arguments (identity mapping makes guest pointers valid), memory calls go through
 //! `mem.rs` without `PROT_EXEC`, and anything off the list returns `-ENOSYS`.
 //!
+//! `execve` runs calco again on the new program; `fork`, `vfork` and `clone` without
+//! `CLONE_VM` fork the host process, and the child goes on in the dispatcher.
+//!
 //! For now `rt_sigaction` and `rt_sigprocmask` only keep the guest state; nothing is
-//! installed in the host (k2-02). The emulated calls that belong to K2 (threads, signal
-//! delivery, `execve`) also return `-ENOSYS` until then.
+//! installed in the host (k2-02). Signal delivery (k2-02) and `clone` with `CLONE_VM`
+//! (k2-03) return `-ENOSYS` until then.
 
 mod table;
 
 pub use self::table::{Kind, classify};
 
+use std::ffi::OsStr;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 
 use self::table::*;
-use crate::cpu::{Cpu, R8, R9, R10, R11, RAX, RCX, RDI, RDX, RSI};
+use crate::cpu::{Cpu, R8, R9, R10, R11, RAX, RCX, RDI, RDX, RSI, RSP};
+use crate::loader;
 use crate::mem::{Mem, USER_END, host_prot};
 use crate::sys::{
-    self, EFAULT, EINVAL, ENOSYS, EPERM, MAP_ANONYMOUS, PROT_EXEC, PROT_READ, PROT_WRITE,
+    self, AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, E2BIG, EFAULT, EINVAL, ELOOP, ENAMETOOLONG,
+    ENOSYS, EPERM, MAP_ANONYMOUS, PROT_EXEC, PROT_READ, PROT_WRITE,
 };
 
 // /usr/include/asm/prctl.h
@@ -44,6 +51,27 @@ const UNBLOCKABLE: u64 = (1 << (SIGKILL - 1)) | (1 << (SIGSTOP - 1));
 const ROBUST_LIST_HEAD_SIZE: u64 = 24;
 /// Longest path read from the guest (`PATH_MAX`).
 const PATH_MAX: u64 = 4096;
+/// Longest argument or environment string `execve` takes (`MAX_ARG_STRLEN`).
+const MAX_ARG_STRLEN: u64 = 32 * 4096;
+// /usr/include/linux/sched.h
+const CSIGNAL: u64 = 0xff;
+const CLONE_VM: u64 = 0x100;
+const CLONE_SETTLS: u64 = 0x80000;
+const CLONE_CHILD_CLEARTID: u64 = 0x200000;
+const SIGCHLD: u64 = 17;
+// /usr/include/asm-generic/siginfo.h: `si_code` of SIGCHLD whose `si_status` is a signal.
+const CLD_KILLED: i32 = 2;
+const CLD_DUMPED: i32 = 3;
+const CLD_TRAPPED: i32 = 4;
+const CLD_STOPPED: i32 = 5;
+/// Offsets of `si_code` and `si_status` in the x86-64 `siginfo_t` of SIGCHLD.
+const SI_CODE: u64 = 8;
+const SI_STATUS: u64 = 24;
+// /usr/include/asm-generic/mman-common.h
+const MADV_DONTNEED: u64 = 4;
+// /usr/include/asm-generic/fcntl.h
+const F_GETFD: u64 = 1;
+const FCNTL: u64 = 72;
 
 /// Guest `struct sigaction` as `rt_sigaction` takes it on x86-64.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -58,6 +86,8 @@ pub struct SigAction {
 pub struct State {
     /// Absolute path of the guest program, what `/proc/self/exe` reads as.
     exe: Vec<u8>,
+    /// Host path of calco itself, read from `/proc/self/exe` at start; `execve` runs it.
+    calco: Vec<u8>,
     /// File named by `CALCO_LOG`, where unsupported calls are noted.
     log: Option<PathBuf>,
     pub actions: [SigAction; GUEST_SIGNALS as usize],
@@ -120,25 +150,105 @@ fn write_u64(mem: &Mem, addr: u64, v: u64) -> Result<(), i32> {
     write_bytes(mem, addr, &v.to_le_bytes())
 }
 
-/// The NUL-terminated string at `addr`, if it is readable guest memory.
-fn read_cstr(mem: &Mem, addr: u64) -> Option<Vec<u8>> {
+fn read_u32(mem: &Mem, addr: u64) -> Result<u32, i32> {
+    if !accessible(mem, addr, 4, false) {
+        return Err(EFAULT);
+    }
+    Ok(unsafe { (addr as *const u32).read_unaligned() })
+}
+
+fn write_u32(mem: &Mem, addr: u64, v: u32) -> Result<(), i32> {
+    write_bytes(mem, addr, &v.to_le_bytes())
+}
+
+/// The NUL-terminated string at `addr`, NUL included in `max`: `EFAULT` if it leaves
+/// readable guest memory, `too_long` if it does not end in time.
+fn read_string(mem: &Mem, addr: u64, max: u64, too_long: i32) -> Result<Vec<u8>, i32> {
     let mut out = Vec::new();
     let mut at = addr;
-    while out.len() < PATH_MAX as usize {
-        let r = mem.intervals.find(at)?;
+    while out.len() < max as usize {
+        let r = mem.intervals.find(at).ok_or(EFAULT)?;
         if host_prot(r.prot) & PROT_READ == 0 {
-            return None;
+            return Err(EFAULT);
         }
-        while at < r.end && out.len() < PATH_MAX as usize {
+        while at < r.end && out.len() < max as usize {
             let b = unsafe { (at as *const u8).read() };
             if b == 0 {
-                return Some(out);
+                return Ok(out);
             }
             out.push(b);
             at += 1;
         }
     }
-    None
+    Err(too_long)
+}
+
+/// The path at `addr`, if it is readable guest memory.
+fn read_cstr(mem: &Mem, addr: u64) -> Option<Vec<u8>> {
+    read_string(mem, addr, PATH_MAX, ENAMETOOLONG).ok()
+}
+
+/// The NULL-terminated string array at `addr` (`argv`, `envp`); a NULL array is empty.
+fn read_strings(mem: &Mem, addr: u64) -> Result<Vec<Vec<u8>>, i32> {
+    let mut out = Vec::new();
+    if addr == 0 {
+        return Ok(out);
+    }
+    loop {
+        let at = addr.checked_add(8 * out.len() as u64).ok_or(EFAULT)?;
+        match read_u64(mem, at)? {
+            0 => return Ok(out),
+            p => out.push(read_string(mem, p, MAX_ARG_STRLEN, E2BIG)?),
+        }
+    }
+}
+
+fn is_proc_self_exe(path: &[u8]) -> bool {
+    path == b"/proc/self/exe" || path == b"/proc/thread-self/exe"
+}
+
+/// Host argv that runs calco again on `path` with the guest `argv` (contract 3.10). An
+/// empty guest argv gets an empty argv[0], as the kernel gives it.
+pub fn reexec_argv(calco: &[u8], path: &[u8], argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let mut out = vec![
+        calco.to_vec(),
+        b"--argv0".to_vec(),
+        argv.first().cloned().unwrap_or_default(),
+        b"--".to_vec(),
+        path.to_vec(),
+    ];
+    out.extend(argv.iter().skip(1).cloned());
+    out
+}
+
+/// Guest number of host signal `sig`: 64 and 63 go back to 32 and 33.
+pub fn guest_signal(sig: u32) -> u32 {
+    match sig {
+        64 => 32,
+        63 => 33,
+        s => s,
+    }
+}
+
+/// `wait4` status as the guest sees it: the terminating or stopping signal translated,
+/// the rest (exit code, core flag, ptrace event) as it is.
+pub fn guest_wait_status(status: u32) -> u32 {
+    if status & 0xff == 0x7f {
+        let sig = (status >> 8) & 0xff;
+        (status & !0xff00) | (guest_signal(sig) << 8)
+    } else if status & 0x7f != 0 {
+        (status & !0x7f) | guest_signal(status & 0x7f)
+    } else {
+        status
+    }
+}
+
+/// `si_status` of a `waitid` result as the guest sees it, given its `si_code`.
+pub fn guest_waitid_status(code: i32, status: i32) -> i32 {
+    match code {
+        CLD_KILLED | CLD_DUMPED | CLD_TRAPPED | CLD_STOPPED => guest_signal(status as u32) as i32,
+        _ => status,
+    }
 }
 
 /// Host number of guest signal `sig` (contract 3.11): 32 and 33 move to 64 and 63; 0 is
@@ -157,9 +267,10 @@ fn gettid() -> u64 {
 }
 
 impl State {
-    pub fn new(exe: Vec<u8>, log: Option<PathBuf>) -> State {
+    pub fn new(exe: Vec<u8>, calco: Vec<u8>, log: Option<PathBuf>) -> State {
         State {
             exe,
+            calco,
             log,
             actions: [SigAction::default(); GUEST_SIGNALS as usize],
             sigmask: 0,
@@ -242,6 +353,45 @@ impl State {
             },
             READLINK => self.readlink(mem, nr, a, a[0], a[1], a[2]),
             READLINKAT => self.readlink(mem, nr, a, a[1], a[2], a[3]),
+            // Threads come with k2-03.
+            CLONE if a[0] & CLONE_VM != 0 => self.unsupported(cpu, nr),
+            CLONE => fork(cpu, a[0], a[1], a[2], a[3], a[4]),
+            FORK | VFORK => fork(cpu, SIGCHLD, 0, 0, 0, 0),
+            EXECVE => match read_string(mem, a[0], PATH_MAX, ENAMETOOLONG) {
+                Ok(path) => self.execve(mem, path, a[1], a[2]),
+                Err(e) => err(e),
+            },
+            EXECVEAT => self.execveat(mem, a),
+            WAIT4 => {
+                let ret = pass(nr, a);
+                if ret > 0
+                    && a[1] != 0
+                    && let Ok(status) = read_u32(mem, a[1])
+                {
+                    let _ = write_u32(mem, a[1], guest_wait_status(status));
+                }
+                ret
+            }
+            WAITID => {
+                let ret = pass(nr, a);
+                let (code, status) = (a[2].wrapping_add(SI_CODE), a[2].wrapping_add(SI_STATUS));
+                if ret == 0
+                    && a[2] != 0
+                    && let (Ok(c), Ok(st)) = (read_u32(mem, code), read_u32(mem, status))
+                {
+                    let st = guest_waitid_status(c as i32, st as i32);
+                    let _ = write_u32(mem, status, st as u32);
+                }
+                ret
+            }
+            MADVISE => {
+                let ret = pass(nr, a);
+                // Dropped pages read back as zeros or the file: translations of them go.
+                if ret == 0 && a[2] == MADV_DONTNEED {
+                    self.note_code_change(mem, a[0], a[1]);
+                }
+                ret
+            }
             PRCTL => match a[0] {
                 PR_SET_PDEATHSIG | PR_SET_NAME | PR_GET_NAME => pass(nr, a),
                 _ => err(EINVAL),
@@ -342,11 +492,68 @@ impl State {
         0
     }
 
+    /// `execve` of `path`: if the kernel would run it, calco runs itself again on it with
+    /// the guest environment (descriptors stay as they are); otherwise the guest gets the
+    /// errno the kernel gives and goes on.
+    fn execve(&self, mem: &Mem, path: Vec<u8>, argv: u64, envp: u64) -> i64 {
+        // In the new process /proc/self/exe is calco: the guest meant its own program.
+        let path = if is_proc_self_exe(&path) {
+            self.exe.clone()
+        } else {
+            path
+        };
+        // Same order as the kernel: the file first, then the argument and environment.
+        if let Err(e) = loader::resolve(Path::new(OsStr::from_bytes(&path)), Vec::new()) {
+            return err(e);
+        }
+        let (argv, envp) = match (read_strings(mem, argv), read_strings(mem, envp)) {
+            (Ok(argv), Ok(envp)) => (argv, envp),
+            (Err(e), _) | (_, Err(e)) => return err(e),
+        };
+        let host_argv = reexec_argv(&self.calco, &path, &argv);
+        err(sys::execve(&self.calco, &host_argv, &envp))
+    }
+
+    /// `execveat`: the path relative to `dirfd` becomes one under `/proc/self/fd`, which
+    /// the new process still has open.
+    fn execveat(&self, mem: &Mem, a: [u64; 6]) -> i64 {
+        let [dirfd, path, argv, envp, flags, _] = a;
+        if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+            return err(EINVAL);
+        }
+        let path = match read_string(mem, path, PATH_MAX, ENAMETOOLONG) {
+            Ok(p) => p,
+            Err(e) => return err(e),
+        };
+        let dirfd = dirfd as i32;
+        let relative = !path.starts_with(b"/") && dirfd != AT_FDCWD;
+        if relative && pass(FCNTL, [dirfd as u64, F_GETFD, 0, 0, 0, 0]) < 0 {
+            return err(sys::EBADF);
+        }
+        let full = if !relative {
+            path
+        } else if path.is_empty() && flags & AT_EMPTY_PATH != 0 {
+            format!("/proc/self/fd/{dirfd}").into_bytes()
+        } else if path.is_empty() {
+            path
+        } else {
+            let mut full = format!("/proc/self/fd/{dirfd}/").into_bytes();
+            full.extend_from_slice(&path);
+            full
+        };
+        if flags & AT_SYMLINK_NOFOLLOW != 0
+            && std::fs::symlink_metadata(OsStr::from_bytes(&full))
+                .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return err(ELOOP);
+        }
+        self.execve(mem, full, argv, envp)
+    }
+
     /// `readlink`/`readlinkat`: `/proc/self/exe` reads as the guest program, not calco;
     /// any other path goes to the kernel.
     fn readlink(&self, mem: &Mem, nr: u64, a: [u64; 6], path: u64, buf: u64, size: u64) -> i64 {
-        let is_exe = read_cstr(mem, path)
-            .is_some_and(|p| p == b"/proc/self/exe" || p == b"/proc/thread-self/exe");
+        let is_exe = read_cstr(mem, path).is_some_and(|p| is_proc_self_exe(&p));
         if !is_exe {
             return pass(nr, a);
         }
@@ -367,6 +574,32 @@ impl State {
         }
         err(ENOSYS)
     }
+}
+
+/// `fork`, `vfork` and `clone` without `CLONE_VM`: the host process forks and the child
+/// goes on in the dispatcher with `rax = 0`. The child's stack and TLS are guest state, so
+/// they go to its `Cpu` instead of to the host; the exit signal is translated.
+fn fork(cpu: &mut Cpu, flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64) -> i64 {
+    let Some(exit_signal) = host_signal(flags & CSIGNAL) else {
+        return err(EINVAL);
+    };
+    let host_flags = (flags & !(CSIGNAL | CLONE_SETTLS)) | exit_signal;
+    // No new stack: the host child returns here on its copy of calco's stack.
+    let args = [host_flags, 0, ptid, ctid, 0, 0];
+    let ret = pass(sys::SYS_CLONE as u64, args);
+    if ret == 0 {
+        cpu.tid = gettid();
+        if stack != 0 {
+            cpu.gpr[RSP] = stack;
+        }
+        if flags & CLONE_SETTLS != 0 {
+            cpu.fs_base = tls;
+        }
+        if flags & CLONE_CHILD_CLEARTID != 0 {
+            cpu.clear_child_tid = ctid;
+        }
+    }
+    ret
 }
 
 fn arch_prctl(cpu: &mut Cpu, mem: &Mem, code: u64, addr: u64) -> i64 {

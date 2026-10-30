@@ -1,15 +1,20 @@
-//! ELF loader: static `ET_EXEC` and `ET_DYN` executables, `brk` start and the initial stack.
+//! ELF loader: static `ET_EXEC` and `ET_DYN` executables, `#!` scripts, `brk` start and
+//! the initial stack.
 //!
 //! Executables with `PT_INTERP` are rejected until the interpreter is supported (K2).
 
+use std::ffi::OsString;
 use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::FileExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::mem::{DYN_BASE, Mem, PAGE_SIZE, STACK_SIZE, USER_END, page_down, page_up};
-use crate::sys::{self, MAP_FIXED, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};
+use crate::sys::{
+    self, EACCES, ELOOP, ENOEXEC, MAP_FIXED, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE,
+};
 
 // /usr/include/elf.h
 const ELF_MAGIC: [u8; 4] = *b"\x7fELF";
@@ -54,6 +59,10 @@ pub const AT_MINSIGSTKSZ: u64 = 51;
 /// `MINSIGSTKSZ` of /usr/include/asm/signal.h; the guest frame is FXSAVE-only, no XSAVE.
 const MINSIGSTKSZ: u64 = 2048;
 const PLATFORM: &[u8] = b"x86_64\0";
+/// Bytes of the file start the kernel reads to find the format and the `#!` line.
+pub const BINPRM_BUF_SIZE: usize = 256;
+/// Format rewrites the kernel follows before `ELOOP` (`exec_binprm` in fs/exec.c).
+const MAX_EXEC_DEPTH: usize = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Phdr {
@@ -362,10 +371,101 @@ fn map_segment(mem: &mut Mem, fd: i32, ph: &Phdr, bias: u64) -> Result<(), i32> 
     Ok(())
 }
 
+/// The start of `file`: what the kernel reads to tell the format, extended to the whole
+/// program header table of an ELF.
+fn read_head(file: &File) -> io::Result<Vec<u8>> {
+    let image = read_prefix(file, BINPRM_BUF_SIZE)?;
+    match phdr_table_end(&image).filter(|&e| e > image.len() && image[..4] == ELF_MAGIC) {
+        Some(end) => read_prefix(
+            file,
+            end.min(EHDR_SIZE + MAX_PHDR_TABLE + PAGE_SIZE as usize),
+        ),
+        None => Ok(image),
+    }
+}
+
+/// Interpreter and optional argument of a `#!` line, parsed as `load_script` does
+/// (fs/binfmt_script.c): only the first `BINPRM_BUF_SIZE` bytes count, the interpreter
+/// ends at a space, tab or NUL, and the rest of the line, without the spaces or tabs
+/// around it, is one argument.
+pub fn parse_shebang(head: &[u8]) -> Result<(Vec<u8>, Option<Vec<u8>>), i32> {
+    let spacetab = |c: u8| c == b' ' || c == b'\t';
+    let mut buf = [0u8; BINPRM_BUF_SIZE];
+    let n = head.len().min(BINPRM_BUF_SIZE);
+    buf[..n].copy_from_slice(&head[..n]);
+    if !buf.starts_with(b"#!") {
+        return Err(ENOEXEC);
+    }
+    let last = BINPRM_BUF_SIZE - 1;
+    let mut end = match buf.iter().position(|&c| c == b'\n') {
+        Some(nl) => nl,
+        None => {
+            // Without a newline the line was cut; an interpreter cut too is refused.
+            let name = (2..=last).find(|&i| !spacetab(buf[i])).ok_or(ENOEXEC)?;
+            if !buf[name..=last].iter().any(|&c| spacetab(c) || c == 0) {
+                return Err(ENOEXEC);
+            }
+            last
+        }
+    };
+    while end > 2 && spacetab(buf[end - 1]) {
+        end -= 1;
+    }
+    let line = &buf[2..end];
+    let start = line.iter().position(|&c| !spacetab(c)).ok_or(ENOEXEC)?;
+    let line = &line[start..];
+    let cstr = |s: &[u8]| s[..s.iter().position(|&c| c == 0).unwrap_or(s.len())].to_vec();
+    match line.iter().position(|&c| spacetab(c) || c == 0) {
+        Some(sep) if line[sep] != 0 => {
+            let rest = &line[sep..];
+            let arg = rest
+                .iter()
+                .position(|&c| !spacetab(c))
+                .map(|i| cstr(&rest[i..]));
+            Ok((line[..sep].to_vec(), arg))
+        }
+        _ => Ok((cstr(line), None)),
+    }
+}
+
+/// Follows `path` like `execve` does before loading: checks that it may be executed and
+/// rewrites `#!` scripts into their interpreter (argv[0] goes away; interpreter, optional
+/// argument and script path come first). Returns the ELF to load and its argv, or the
+/// errno the kernel gives.
+pub fn resolve(path: &Path, mut argv: Vec<Vec<u8>>) -> Result<(PathBuf, Vec<Vec<u8>>), i32> {
+    let mut path = path.to_path_buf();
+    for _ in 0..=MAX_EXEC_DEPTH {
+        let bytes = path.as_os_str().as_bytes();
+        sys::access_exec(bytes)?;
+        let file = File::open(&path).map_err(|e| e.raw_os_error().unwrap_or(EACCES))?;
+        let meta = file
+            .metadata()
+            .map_err(|e| e.raw_os_error().unwrap_or(EACCES))?;
+        if !meta.is_file() {
+            return Err(EACCES);
+        }
+        let head = read_head(&file).map_err(|e| e.raw_os_error().unwrap_or(EACCES))?;
+        if !head.starts_with(b"#!") {
+            parse(&head).map_err(|_| ENOEXEC)?;
+            return Ok((path, argv));
+        }
+        let (interp, arg) = parse_shebang(&head)?;
+        let mut next = vec![interp.clone()];
+        next.extend(arg);
+        next.push(bytes.to_vec());
+        next.extend(argv.into_iter().skip(1));
+        argv = next;
+        path = PathBuf::from(OsString::from_vec(interp));
+    }
+    Err(ELOOP)
+}
+
 /// Loads a static executable into `mem`, reserves the code cache, maps the stack and writes
-/// the initial stack. `hwcap` is the already filtered CPUID.1:EDX.
+/// the initial stack. `execfn` is the path `AT_EXECFN` names (the script for `#!`);
+/// `hwcap` is the already filtered CPUID.1:EDX.
 pub fn load(
     path: &Path,
+    execfn: &[u8],
     mem: &mut Mem,
     argv: &[Vec<u8>],
     envp: &[Vec<u8>],
@@ -373,11 +473,7 @@ pub fn load(
 ) -> Result<Loaded, String> {
     let name = path.display();
     let file = File::open(path).map_err(|e| format!("{name}: {e}"))?;
-    let mut image = read_prefix(&file, EHDR_SIZE).map_err(|e| format!("{name}: {e}"))?;
-    if let Some(end) = phdr_table_end(&image).filter(|&e| e > EHDR_SIZE) {
-        let want = end.min(EHDR_SIZE + MAX_PHDR_TABLE + PAGE_SIZE as usize);
-        image = read_prefix(&file, want).map_err(|e| format!("{name}: {e}"))?;
-    }
+    let image = read_head(&file).map_err(|e| format!("{name}: {e}"))?;
     let elf = parse(&image).map_err(|e| format!("{name}: {e}"))?;
     if elf.has_interp() {
         return Err(format!(
@@ -440,7 +536,6 @@ pub fn load(
     let top = mem
         .map_stack()
         .map_err(|e| format!("cannot map the guest stack: {}", os_err(e)))?;
-    let execfn = path.as_os_str().as_encoded_bytes();
     let stack = build_stack(top, argv, envp, execfn, random, &aux);
     if stack.bytes.len() as u64 > STACK_SIZE {
         return Err("arguments and environment do not fit in the guest stack".into());

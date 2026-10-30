@@ -1,9 +1,9 @@
 use super::*;
 use crate::mem::{BRK_LIMIT, PAGE_SIZE};
-use crate::sys::MAP_PRIVATE;
+use crate::sys::{EACCES, ENOENT, ENOEXEC, MAP_PRIVATE};
 
 fn state() -> State {
-    State::new(b"/opt/guest/hello".to_vec(), None)
+    State::new(b"/opt/guest/hello".to_vec(), b"/opt/calco".to_vec(), None)
 }
 
 /// Permission column of the host `/proc/self/maps` line that starts at `addr`.
@@ -79,7 +79,9 @@ fn classification_of_numbers() {
         (1, Kind::Pass),
         (202, Kind::Pass),
         (318, Kind::Pass),
-        (28, Kind::Pass),
+        (MADVISE, Kind::Emulated),
+        (WAIT4, Kind::Emulated),
+        (EXECVE, Kind::Emulated),
         (MMAP, Kind::Emulated),
         (BRK, Kind::Emulated),
         (READLINK, Kind::Emulated),
@@ -162,4 +164,98 @@ fn signal_numbers_map_like_the_contract() {
     assert_eq!(host_signal(61), Some(61));
     assert_eq!(host_signal(62), None);
     assert_eq!(host_signal(65), None);
+}
+
+#[test]
+fn reexec_runs_calco_on_the_program_with_the_guest_argv() {
+    let argv = [b"name".to_vec(), b"child".to_vec(), b"".to_vec()];
+    let want: [&[u8]; 7] = [
+        b"/opt/calco",
+        b"--argv0",
+        b"name",
+        b"--",
+        b"./exec",
+        b"child",
+        b"",
+    ];
+    assert_eq!(reexec_argv(b"/opt/calco", b"./exec", &argv), want);
+    let want: [&[u8]; 5] = [b"/opt/calco", b"--argv0", b"", b"--", b"-x"];
+    assert_eq!(reexec_argv(b"/opt/calco", b"-x", &[]), want);
+}
+
+#[test]
+fn wait_status_signals_63_and_64_become_33_and_32() {
+    // Killed (with and without core), stopped, exited, killed by a signal kept as is.
+    assert_eq!(guest_wait_status(63), 33);
+    assert_eq!(guest_wait_status(0x80 | 64), 0x80 | 32);
+    assert_eq!(guest_wait_status((64 << 8) | 0x7f), (32 << 8) | 0x7f);
+    assert_eq!(guest_wait_status(7 << 8), 7 << 8);
+    assert_eq!(guest_wait_status(9), 9);
+    assert_eq!(guest_waitid_status(CLD_KILLED, 64), 32);
+    assert_eq!(guest_waitid_status(CLD_STOPPED, 63), 33);
+    assert_eq!(
+        guest_waitid_status(1, 63),
+        63,
+        "an exit code is not a signal"
+    );
+}
+
+#[test]
+fn execve_that_the_kernel_refuses_returns_its_errno() {
+    let mut st = state();
+    let mut cpu = Cpu::new(0, 0);
+    let mut mem = Mem::new();
+    mem.set_brk_base(0x0000_2c00_0000_0000);
+    let rw = (PROT_READ | PROT_WRITE) as u64;
+    let flags = (MAP_PRIVATE | MAP_ANONYMOUS) as u64;
+    let page = st.dispatch(
+        &mut cpu,
+        &mut mem,
+        MMAP,
+        [0, PAGE_SIZE, rw, flags, u64::MAX, 0],
+    );
+    assert!(page > 0, "mmap failed: {page}");
+    let page = page as u64;
+
+    let dir = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let text = dir.join("calco-k2-01-text");
+    let script = dir.join("calco-k2-01-script");
+    std::fs::write(&text, "not a program\n").unwrap();
+    std::fs::write(&script, "#! /nonexistent/calco-k2-01 -x\n").unwrap();
+    for f in [&text, &script] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let cases: [(&[u8], i32); 5] = [
+        (b"/nonexistent/calco-k2-01", ENOENT),
+        (b"/", EACCES),
+        (b"/etc/passwd", EACCES),
+        (text.as_os_str().as_encoded_bytes(), ENOEXEC),
+        (script.as_os_str().as_encoded_bytes(), ENOENT),
+    ];
+    for (path, errno) in cases {
+        // Path at the page start, argv = { path, NULL } after it.
+        let argv = page + 2048;
+        unsafe {
+            std::ptr::write_bytes(page as *mut u8, 0, PAGE_SIZE as usize);
+            std::ptr::copy_nonoverlapping(path.as_ptr(), page as *mut u8, path.len());
+            (argv as *mut u64).write(page);
+        }
+        let args = [page, argv, 0, 0, 0, 0];
+        assert_eq!(
+            st.dispatch(&mut cpu, &mut mem, EXECVE, args),
+            -(errno as i64),
+            "{}",
+            String::from_utf8_lossy(path)
+        );
+    }
+    let bad = [page + PAGE_SIZE, 0, 0, 0, 0, 0];
+    assert_eq!(
+        st.dispatch(&mut cpu, &mut mem, EXECVE, bad),
+        -(EFAULT as i64)
+    );
 }

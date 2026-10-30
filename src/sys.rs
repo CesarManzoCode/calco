@@ -13,6 +13,8 @@ pub const SYS_MUNMAP: usize = 11;
 pub const SYS_RT_SIGACTION: usize = 13;
 pub const SYS_RT_SIGPROCMASK: usize = 14;
 pub const SYS_MREMAP: usize = 25;
+pub const SYS_CLONE: usize = 56;
+pub const SYS_EXECVE: usize = 59;
 pub const SYS_GETPID: usize = 39;
 pub const SYS_EXIT: usize = 60;
 pub const SYS_GETUID: usize = 102;
@@ -23,6 +25,7 @@ pub const SYS_GETTID: usize = 186;
 pub const SYS_EXIT_GROUP: usize = 231;
 pub const SYS_TGKILL: usize = 234;
 pub const SYS_GETRANDOM: usize = 318;
+pub const SYS_FACCESSAT2: usize = 439;
 
 // /usr/include/asm-generic/mman-common.h
 pub const PROT_NONE: u32 = 0x0;
@@ -46,14 +49,28 @@ pub const MAP_NORESERVE: u32 = 0x4000;
 
 // /usr/include/asm-generic/errno-base.h
 pub const EPERM: i32 = 1;
+pub const ENOENT: i32 = 2;
 pub const EINTR: i32 = 4;
+pub const E2BIG: i32 = 7;
+pub const ENOEXEC: i32 = 8;
+pub const EBADF: i32 = 9;
 pub const ENOMEM: i32 = 12;
 pub const EACCES: i32 = 13;
 pub const EFAULT: i32 = 14;
 pub const EEXIST: i32 = 17;
 pub const EINVAL: i32 = 22;
 // /usr/include/asm-generic/errno.h
+pub const ENAMETOOLONG: i32 = 36;
 pub const ENOSYS: i32 = 38;
+pub const ELOOP: i32 = 40;
+
+// /usr/include/linux/fcntl.h
+pub const AT_FDCWD: i32 = -100;
+pub const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+pub const AT_EACCESS: usize = 0x200;
+pub const AT_EMPTY_PATH: u64 = 0x1000;
+// /usr/include/unistd.h
+pub const X_OK: usize = 1;
 
 // /usr/include/asm-generic/signal-defs.h
 const SIG_DFL: usize = 0;
@@ -249,6 +266,50 @@ pub fn getrandom(buf: &mut [u8]) -> Result<(), i32> {
         }
     }
     Ok(())
+}
+
+fn nul_terminated(s: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(s.len() + 1);
+    v.extend_from_slice(s);
+    v.push(0);
+    v
+}
+
+/// Whether `path` may be executed by the effective ids: the lookup and permission errors
+/// `execve` gives (`ENOENT`, `ENOTDIR`, `EACCES`, `ELOOP`…).
+pub fn access_exec(path: &[u8]) -> Result<(), i32> {
+    let path = nul_terminated(path);
+    let ret = unsafe {
+        syscall4(
+            SYS_FACCESSAT2,
+            AT_FDCWD as isize as usize,
+            path.as_ptr() as usize,
+            X_OK,
+            AT_EACCESS,
+        )
+    };
+    check(ret).map(|_| ())
+}
+
+/// Replaces this process by `path` with `argv` and `envp`. Returns only on failure,
+/// with the errno.
+pub fn execve(path: &[u8], argv: &[Vec<u8>], envp: &[Vec<u8>]) -> i32 {
+    let path = nul_terminated(path);
+    let argv: Vec<Vec<u8>> = argv.iter().map(|s| nul_terminated(s)).collect();
+    let envp: Vec<Vec<u8>> = envp.iter().map(|s| nul_terminated(s)).collect();
+    let table = |v: &[Vec<u8>]| -> Vec<usize> {
+        v.iter().map(|s| s.as_ptr() as usize).chain([0]).collect()
+    };
+    let (argv_table, envp_table) = (table(&argv), table(&envp));
+    let ret = unsafe {
+        syscall3(
+            SYS_EXECVE,
+            path.as_ptr() as usize,
+            argv_table.as_ptr() as usize,
+            envp_table.as_ptr() as usize,
+        )
+    };
+    check(ret).err().unwrap_or(EINVAL)
 }
 
 /// `struct sigaction` as `rt_sigaction` takes it on x86-64.

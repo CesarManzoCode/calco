@@ -77,9 +77,17 @@ fn main() {
         .collect();
 
     let program = PathBuf::from(args.program);
+    let (image, argv) = loader::resolve(&program, argv).unwrap_or_else(|e| {
+        fail(&format!(
+            "{}: {}",
+            program.display(),
+            std::io::Error::from_raw_os_error(e)
+        ))
+    });
     let mut mem = mem::Mem::new();
-    let loaded =
-        loader::load(&program, &mut mem, &argv, &envp, cpuid::hwcap()).unwrap_or_else(|e| fail(&e));
+    let execfn = program.as_os_str().as_bytes();
+    let loaded = loader::load(&image, execfn, &mut mem, &argv, &envp, cpuid::hwcap())
+        .unwrap_or_else(|e| fail(&e));
     let mut cpu = cpu::Cpu::new(loaded.entry, loaded.rsp);
     let mut jit = jit::Jit::new(&mem).unwrap_or_else(|e| {
         fail(&format!(
@@ -87,11 +95,18 @@ fn main() {
             std::io::Error::from_raw_os_error(e)
         ))
     });
-    // What the guest reads from /proc/self/exe; calco's own path is the kernel's answer.
-    let exe = std::fs::canonicalize(&program).unwrap_or(program);
+    // What the guest reads from /proc/self/exe; calco's own path is the kernel's answer,
+    // and the one guest `execve` runs again.
+    let exe = std::fs::canonicalize(&image).unwrap_or(image);
+    let calco = std::fs::read_link("/proc/self/exe")
+        .unwrap_or_else(|e| fail(&format!("/proc/self/exe: {e}")));
     let log = env::var_os("CALCO_LOG")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
-    let mut state = syscall::State::new(exe.into_os_string().into_vec(), log);
+    let mut state = syscall::State::new(
+        exe.into_os_string().into_vec(),
+        calco.into_os_string().into_vec(),
+        log,
+    );
     jit::run(&mut cpu, &mut mem, &mut jit, &mut state)
 }
