@@ -1,0 +1,4 @@
+# Opciones de busybox 1.36.1 desactivadas tras defconfig porque no compilan con los encabezados
+# de esta máquina (Linux 7.2.11, glibc 2.44, gcc 16.2.1). Formato: CONFIG_NOMBRE<TAB>motivo.
+# scripts/build_targets.py lee este archivo.
+CONFIG_TC	networking/tc.c usa TCA_CBQ_* y struct tc_cbq_*, que los encabezados del kernel quitaron al retirar CBQ (Linux 6.8): «TCA_CBQ_MAX undeclared».

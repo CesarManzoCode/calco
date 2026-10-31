@@ -1,0 +1,18 @@
+mnemonic	reason
+rdtsc	reads the time-stamp counter: differs between runs
+rdtscp	reads the time-stamp counter and TSC_AUX: differs between runs
+rdrand	hardware random number: differs between runs
+rcpps	approximation whose precision differs between implementations
+rcpss	approximation whose precision differs between implementations
+rsqrtps	approximation whose precision differs between implementations
+rsqrtss	approximation whose precision differs between implementations
+cpuid	filtered by calco (contract 3.9): differs from native by design
+syscall	leaves the batch: the dump routine owns the only system calls
+ud2	trap: ends the process with SIGILL
+int3	trap: ends the process with SIGTRAP
+int	trap: ends the process with SIGSEGV
+hlt	privileged: ends the process with SIGSEGV
+cli	privileged: ends the process with SIGSEGV
+sti	privileged: ends the process with SIGSEGV
+in	privileged: ends the process with SIGSEGV
+out	privileged: ends the process with SIGSEGV

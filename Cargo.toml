@@ -1,0 +1,21 @@
+[package]
+name = "calco"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Dynamic binary translator from x86-64 to x86-64 for Linux user-mode programs"
+
+[dependencies]
+
+# Injected faults of the harness (contract 4.6); harness/mutants.tsv describes them.
+[features]
+mutant-adc-carry = []
+mutant-shift-flags = []
+mutant-movsxd = []
+mutant-riprel-disp = []
+mutant-pshufd-imm = []
+mutant-fadd-fsub = []
+
+[profile.release]
+panic = "abort"
+debug = 1

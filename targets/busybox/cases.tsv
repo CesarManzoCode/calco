@@ -1,0 +1,72 @@
+# Casos de busybox (contrato, sección 6): stdin<TAB>applet<TAB>arg1<TAB>arg2…
+# stdin es un archivo de inputs/ o - (vacío). Cada caso corre `busybox applet args…`
+# con inputs/ como directorio actual; ninguno escribe archivos ni depende de la hora,
+# del PID, del usuario ni de la red. Lo corre scripts/busybox_run.py.
+# texto
+-	cat	-n	-A	text.txt
+-	wc	text.txt	words.txt	data.csv
+-	head	-n	3	text.txt
+-	tail	-n	4	text.txt
+-	sort	words.txt
+words.txt	sort	-r	-u
+-	sort	-t	,	-k	3	-n	data.csv
+-	uniq	-c	words.txt
+-	cut	-d	,	-f	2,4	data.csv
+-	grep	-n	-i	the	text.txt
+-	grep	-c	-E	^[a-f]	words.txt
+text.txt	tr	a-z	A-Z
+text.txt	tr	-d	aeiou
+-	fold	-w	17	-s	text.txt
+-	nl	-b	a	text.txt
+-	rev	text.txt
+-	tac	text.txt
+-	paste	-d	:	words.txt	data.csv
+-	expand	-t	4	text.txt
+-	diff	text.txt	text2.txt
+-	cmp	text.txt	text2.txt
+text.txt	unix2dos
+words.txt	xargs	-n	3	echo
+-	sed	-f	script.sed	text.txt
+-	sed	-n	-e	s/o/0/gp	text.txt
+-	awk	-f	prog.awk	data.csv
+-	awk	BEGIN { for (i = 1; i <= 12; i++) printf "%d %.8f %.3e\n", i, 1 / i, i ^ 9 }
+# binario
+-	md5sum	text.txt	bin.dat
+-	sha1sum	bin.dat
+-	sha256sum	bin.dat	text.txt
+-	sha512sum	bin.dat
+-	sha3sum	bin.dat
+-	cksum	bin.dat
+-	sum	bin.dat
+-	od	-A	x	-t	x1	-N	96	bin.dat
+-	hexdump	-C	bin.dat
+-	xxd	-s	256	-l	128	bin.dat
+-	base64	bin.dat
+-	strings	-n	6	bin.dat
+bin.dat	uuencode	-m	bin.dat
+# comprimido
+-	zcat	text.txt.gz
+-	gunzip	-c	bin.dat.gz
+-	bzcat	text.txt.bz2
+-	xzcat	text.txt.xz
+text.txt	bzip2	-c	-9
+-	tar	-tvf	archive.tar
+-	tar	-xOf	archive.tar	dir/words.txt
+-	unzip	-l	archive.zip
+-	unzip	-p	archive.zip	zip/text.txt
+# cálculo y shell
+-	expr	6	*	7	+	100	/	3
+-	seq	-s	,	-w	1	3	40
+-	factor	360	1001	65537	4294967291	600851475143
+-	printf	%05d|%-6s|%x|%o|%.3f|%e\n	42	abc	255	8	3.14159	0.000123
+-	echo	-e	a\tb\nc	d
+-	basename	/usr/local/lib/libcalco.so.1	.1
+-	dirname	/usr/local/lib/libcalco.so.1
+calc.bc	bc	-q
+-	dc	calc.dc
+-	date	-u	-d	@1000000000	+%Y-%m-%d %H:%M:%S %j %a
+-	cal	2	2024
+-	getopt	-o	ab:c	--	-a	-b	x	-c	rest	more
+-	sh	-c	i=0; s=0; while [ $i -lt 200 ]; do s=$((s + i * i)); i=$((i + 1)); done; echo $s; while read w; do case $w in a*|b*) echo "<$w>";; esac; done < words.txt
+-	sh	-c	f() { [ $1 -le 1 ] && echo 1 && return; echo $(( $1 * $(f $(($1 - 1))) )); }; f 20; echo done; exit 3
+-	false

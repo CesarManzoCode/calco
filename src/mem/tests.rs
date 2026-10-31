@@ -1,0 +1,215 @@
+use super::*;
+
+const R: u32 = PROT_READ;
+const RW: u32 = PROT_READ | PROT_WRITE;
+const RX: u32 = PROT_READ | PROT_EXEC;
+
+fn region(start: u64, end: u64, prot: u32) -> Region {
+    Region { start, end, prot }
+}
+
+#[test]
+fn insert_merges_adjacent_same_prot() {
+    let mut iv = Intervals::new();
+    iv.insert(0x1000, 0x3000, RW);
+    iv.insert(0x3000, 0x5000, RW);
+    assert_eq!(iv.regions(), vec![region(0x1000, 0x5000, RW)]);
+    iv.insert(0x5000, 0x6000, R);
+    let want = vec![region(0x1000, 0x5000, RW), region(0x5000, 0x6000, R)];
+    assert_eq!(iv.regions(), want);
+}
+
+#[test]
+fn protect_middle_splits_and_restore_merges() {
+    let mut iv = Intervals::new();
+    iv.insert(0x10000, 0x20000, RW);
+    iv.insert(0x14000, 0x15000, RX);
+    assert_eq!(
+        iv.regions(),
+        vec![
+            region(0x10000, 0x14000, RW),
+            region(0x14000, 0x15000, RX),
+            region(0x15000, 0x20000, RW),
+        ]
+    );
+    iv.insert(0x14000, 0x15000, RW);
+    assert_eq!(iv.regions(), vec![region(0x10000, 0x20000, RW)]);
+}
+
+#[test]
+fn remove_splits() {
+    let mut iv = Intervals::new();
+    iv.insert(0x10000, 0x20000, RW);
+    iv.remove(0x12000, 0x13000);
+    let want = vec![region(0x10000, 0x12000, RW), region(0x13000, 0x20000, RW)];
+    assert_eq!(iv.regions(), want);
+    iv.remove(0x0, 0x11000);
+    iv.remove(0x1f000, 0x30000);
+    let want = vec![region(0x11000, 0x12000, RW), region(0x13000, 0x1f000, RW)];
+    assert_eq!(iv.regions(), want);
+}
+
+#[test]
+fn gaps_covers_and_find() {
+    let mut iv = Intervals::new();
+    iv.insert(0x2000, 0x4000, R);
+    iv.insert(0x6000, 0x7000, RW);
+    let want = vec![(0x1000, 0x2000), (0x4000, 0x6000), (0x7000, 0x8000)];
+    assert_eq!(iv.gaps(0x1000, 0x8000), want);
+    assert!(iv.covers(0x2000, 0x4000));
+    assert!(!iv.covers(0x2000, 0x5000));
+    assert!(iv.overlaps(0x3000, 0x6001));
+    assert!(!iv.overlaps(0x4000, 0x6000));
+    assert_eq!(iv.find(0x6fff), Some(region(0x6000, 0x7000, RW)));
+    assert_eq!(iv.find(0x7000), None);
+}
+
+#[test]
+fn first_fit_skips_used_ranges() {
+    let mut iv = Intervals::new();
+    iv.insert(0x10000, 0x12000, R);
+    iv.insert(0x13000, 0x14000, R);
+    assert_eq!(iv.first_fit(0x10000, 0x20000, 0x1000), Some(0x12000));
+    assert_eq!(iv.first_fit(0x10000, 0x20000, 0x2000), Some(0x14000));
+    assert_eq!(iv.first_fit(0x10000, 0x15000, 0x2000), None);
+}
+
+#[test]
+fn host_prot_never_exec() {
+    assert_eq!(host_prot(PROT_EXEC), PROT_READ);
+    assert_eq!(host_prot(RX | PROT_WRITE), RW);
+    assert_eq!(host_prot(PROT_NONE), PROT_NONE);
+}
+
+#[test]
+fn layout_follows_brk() {
+    let mut mem = Mem::new();
+    mem.set_brk_base(0x40_1000);
+    assert_eq!(mem.code_cache(), 0x4060_0000);
+    let window = mem.code_cache() + CODE_CACHE_SIZE + (16 << 20);
+    assert_eq!(mem.window_start(), window);
+}
+
+// The real-mapping tests use fixed addresses far from where the kernel places anything
+// (top-down near 0x7f..), one distinct block per test.
+
+#[test]
+fn map_fixed_over_foreign_range_is_enomem() {
+    let host = unsafe { sys::mmap(0, PAGE_SIZE, RW, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) }.unwrap();
+    unsafe { (host as *mut u8).write(0xa5) };
+    let mut mem = Mem::new();
+    let flags = MAP_PRIVATE | MAP_FIXED;
+    assert_eq!(mem.map_anon(host, PAGE_SIZE, RW, flags), Err(ENOMEM));
+    let noreplace = MAP_PRIVATE | MAP_FIXED_NOREPLACE;
+    assert_eq!(mem.map_anon(host, PAGE_SIZE, RW, noreplace), Err(ENOMEM));
+    assert_eq!(unsafe { (host as *const u8).read() }, 0xa5);
+    assert!(mem.intervals.regions().is_empty());
+    unsafe { sys::munmap(host, PAGE_SIZE) }.unwrap();
+}
+
+#[test]
+fn map_fixed_over_guest_range_replaces() {
+    let base = 0x0000_2a00_0000_0000;
+    let mut mem = Mem::new();
+    let flags = MAP_PRIVATE | MAP_FIXED;
+    assert_eq!(mem.map_anon(base, 3 * PAGE_SIZE, RW, flags), Ok(base));
+    let mid = base + PAGE_SIZE;
+    unsafe { (mid as *mut u8).write(7) };
+    assert_eq!(mem.map_anon(mid, PAGE_SIZE, R, flags), Ok(mid));
+    assert_eq!(unsafe { (mid as *const u8).read() }, 0);
+    assert_eq!(
+        mem.intervals.regions(),
+        vec![
+            region(base, mid, RW),
+            region(mid, mid + PAGE_SIZE, R),
+            region(mid + PAGE_SIZE, base + 3 * PAGE_SIZE, RW),
+        ]
+    );
+    let noreplace = MAP_PRIVATE | MAP_FIXED_NOREPLACE;
+    assert_eq!(mem.map_anon(base, PAGE_SIZE, RW, noreplace), Err(EEXIST));
+    mem.protect(mid, PAGE_SIZE, RW).unwrap();
+    let whole = vec![region(base, base + 3 * PAGE_SIZE, RW)];
+    assert_eq!(mem.intervals.regions(), whole);
+    mem.unmap(mid, PAGE_SIZE).unwrap();
+    assert_eq!(mem.intervals.regions().len(), 2);
+    assert_eq!(mem.protect(base, 3 * PAGE_SIZE, R), Err(ENOMEM));
+    mem.unmap(base, 3 * PAGE_SIZE).unwrap();
+    assert!(mem.intervals.regions().is_empty());
+}
+
+#[test]
+fn placement_uses_window() {
+    let mut mem = Mem::new();
+    mem.set_brk_base(0x0000_2b00_0000_0000);
+    let flags = MAP_PRIVATE;
+    let a = mem.map_anon(0, 2 * PAGE_SIZE, RW, flags).unwrap();
+    assert_eq!(a, mem.window_start());
+    let b = mem.map_anon(0, PAGE_SIZE, R, flags).unwrap();
+    assert_eq!(b, a + 2 * PAGE_SIZE);
+    mem.unmap(a, 3 * PAGE_SIZE).unwrap();
+}
+
+#[test]
+fn brk_grows_shrinks_and_respects_limit() {
+    let base = 0x0000_2c00_0000_0100;
+    let mut mem = Mem::new();
+    mem.set_brk_base(base);
+    assert_eq!(mem.brk(0), base);
+    assert_eq!(mem.brk(base + BRK_LIMIT + 1), base);
+    assert_eq!(mem.brk(base + BRK_LIMIT), base + BRK_LIMIT);
+    let top = base + 3 * PAGE_SIZE;
+    assert_eq!(mem.brk(top), top);
+    unsafe { ((top - 1) as *mut u8).write(1) };
+    assert_eq!(mem.intervals.find(top - 1).map(|r| r.prot), Some(RW));
+    assert_eq!(mem.brk(base), base);
+    assert_eq!(mem.intervals.find(top - 1), None);
+}
+
+/// Permissions of the host mapping that starts at `addr`, from `/proc/self/maps`.
+pub(crate) fn host_perms(addr: u64) -> Option<String> {
+    let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+    let start = format!("{addr:x}-");
+    let line = maps.lines().find(|l| l.starts_with(&start))?;
+    line.split_whitespace().nth(1).map(str::to_owned)
+}
+
+#[test]
+fn shm_attaches_in_the_window_without_host_exec() {
+    // /usr/include/linux/ipc.h
+    const IPC_PRIVATE: usize = 0;
+    const IPC_CREAT: usize = 0o1000;
+    const IPC_RMID: usize = 0;
+    let size = 3 * PAGE_SIZE - 100;
+    let id = unsafe { sys::syscall3(29, IPC_PRIVATE, size as usize, IPC_CREAT | 0o600) };
+    let id = sys::check(id).unwrap() as i32;
+    assert_eq!(sys::shm_size(id), Ok(size));
+
+    let mut mem = Mem::new();
+    mem.set_brk_base(0x0000_2d00_0000_0000);
+    let a = mem.attach_shm(id, 0, 0).unwrap();
+    assert_eq!(a, mem.window_start());
+    assert_eq!(mem.shm_len(a), Some(3 * PAGE_SIZE));
+    let found = mem.intervals.find(a).map(|r| (r.end, r.prot));
+    assert_eq!(found, Some((a + 3 * PAGE_SIZE, RW)));
+    unsafe { ((a + PAGE_SIZE) as *mut u8).write(0x5a) };
+
+    // A fixed address, rounded, read-only and executable for the guest only.
+    let want = a + (1 << 20);
+    let flags = SHM_RDONLY | SHM_EXEC | SHM_RND;
+    assert_eq!(mem.attach_shm(id, want, flags & !SHM_RND), Ok(want));
+    assert_eq!(mem.intervals.find(want).map(|r| r.prot), Some(RX));
+    assert_eq!(host_perms(want).as_deref(), Some("r--s"));
+    assert_eq!(unsafe { ((want + PAGE_SIZE) as *const u8).read() }, 0x5a);
+    // Over guest memory only with SHM_REMAP.
+    assert_eq!(mem.attach_shm(id, want + 123, flags), Err(EINVAL));
+    assert_eq!(mem.attach_shm(id, want + 123, flags | SHM_REMAP), Ok(want));
+    assert_eq!(mem.attach_shm(id, 0, SHM_REMAP), Err(EINVAL));
+
+    mem.detach_shm(a).unwrap();
+    mem.detach_shm(want).unwrap();
+    assert_eq!(mem.detach_shm(a), Err(EINVAL));
+    assert!(mem.intervals.regions().is_empty());
+    assert_eq!(host_perms(a), None);
+    sys::check(unsafe { sys::syscall3(31, id as usize, IPC_RMID, 0) }).unwrap();
+    assert_eq!(sys::shm_size(id), Err(EINVAL));
+}
