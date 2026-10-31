@@ -14,6 +14,41 @@ Tres decisiones sostienen el resto:
 
 El ciclo de un hilo está en `run` (`src/jit/mod.rs`): busca el bloque del `rip` actual en la caché (o lo traduce), entra con el trampolín, y cuando el bloque sale atiende el motivo (encadenar, llamada al sistema, `cpuid`, señal) y vuelve a empezar.
 
+## Recorrido de un bloque
+
+Un ejemplo ilustrativo (no es una salida volcada de calco) muestra cómo se combinan las reglas de las secciones siguientes. Sea este código de un `ET_EXEC` en `0x401000`:
+
+```
+401000: mov  eax, [rip+0x2000]
+401006: add  eax, 1
+401009: cmp  eax, ebx
+40100b: jne  401020
+40100d: ...
+```
+
+1. El hilo llega al despachador con `rip = 0x401000`. La búsqueda sin candado en `BlockMap` falla, así que `locked_block` toma el candado de la caché, traduce desde `0x401000` y publica el bloque.
+2. `mov eax, [rip+0x2000]` es `Plain` con operando RIP-relativo: se recodifica con un desplazamiento nuevo que apunta a la misma dirección del invitado (`0x403006`), porque la caché está a menos de 2 GiB del ejecutable.
+3. `add` y `cmp` son `Plain` sin nada que reescribir: salen con los mismos prefijos, opcode y operandos. Las flags que deja `cmp` son las del hardware.
+4. `jne` termina el bloque. Se emite `jne rel32` hacia el stub de la salida 0 (destino `0x401020`) y `jmp rel32` hacia el stub de la salida 1 (destino `0x40100d`). Antes de cada salto se rellena con `nop` para que su campo rel32 quede alineado a 4 bytes y se pueda parchear con una sola escritura.
+5. La tabla de pc del bloque dice, para cada tramo de código del anfitrión, en qué instrucción del invitado está el estado (`0x401000`, `0x401006`, …) y que ningún registro vive en `scratch`.
+6. El trampolín `enter` carga los registros del invitado y salta al bloque. Si `jne` se toma, el stub de la salida 0 escribe `0x401020` en `gs:[next_rip]` y `EXIT_BRANCH` con el número de salida en `gs:[exit_reason]`, y salta al *thunk* de salida.
+7. De vuelta en `run`, `rip` pasa a `0x401020` y el despachador recuerda la salida 0. En la vuelta siguiente traduce `0x401020` bajo el candado y parchea el rel32 del `jne` para que apunte al bloque nuevo. Desde entonces ese camino ya no sale a Rust.
+
+## Motivos de salida
+
+El código traducido solo vuelve a Rust por el trampolín de salida, con el motivo en la palabra baja de `Cpu.exit_reason` (constantes `EXIT_*` de `src/jit/translate.rs`). `run` (`src/jit/mod.rs`) lo atiende así:
+
+| Motivo | Quién lo produce | Qué hace el despachador |
+| --- | --- | --- |
+| `EXIT_BRANCH` (1), con el número de salida en la palabra alta | El stub de una salida directa todavía sin encadenar | Traduce el destino si falta y encadena esa salida si es de la generación actual de la caché |
+| `EXIT_INDIRECT` (2) | La salida compartida, cuando la sonda de un salto indirecto falla | Busca o traduce el bloque de `next_rip` y llena su casilla en `LookupTable` |
+| `EXIT_SYSCALL` (3) | `syscall` del invitado | `syscall::handle`; `exit` termina el hilo |
+| `EXIT_CPUID` (4) | `cpuid` del invitado | `cpuid::handle` con las hojas filtradas |
+| `EXIT_SIGNAL` (5), con la señal en los bits 8–15 | `ud2`, `int3`, `int n`, `hlt`, privilegiadas, opcodes fuera del alcance | `signal::trap` entrega al invitado la señal que daría el kernel |
+| `EXIT_INTERRUPTED` (6) | El manejador de señales del anfitrión o `enter` con una señal pendiente | Nada: la vuelta siguiente del ciclo entrega lo pendiente |
+
+Antes de cada entrada el despachador atiende, en este orden, una escritura de código automodificable diferida, las señales pendientes que se pueden entregar y la búsqueda del bloque. La búsqueda sin candado solo vale si no hay que encadenar, ni llenar una casilla, ni ejecutar una sola instrucción; en esos casos toma el candado.
+
 ## Decodificación
 
 El decodificador está en `src/decode/mod.rs` y sus tablas en `src/decode/table.rs`. Es *table-driven*: hay una tabla por mapa de opcodes (un byte, `0F`, `0F 38` y `0F 3A`) y cada casilla dice qué clase de instrucción es y qué operandos lleva. Primero se consumen los prefijos de los grupos 1 a 4, REX y los prefijos obligatorios `66/F2/F3`; luego el opcode, ModRM, SIB, desplazamiento e inmediato.
@@ -97,6 +132,14 @@ Todos los hilos comparten la caché. Traducir, parchear e invalidar se hace bajo
 
 Vaciar la caché exige un **punto seguro**: un hilo está «en la caché» desde antes de buscar un bloque hasta que vuelve a Rust desde `enter`. El hilo que vacía levanta `FLUSHING`, manda la señal 62 del anfitrión a cada hilo que siga dentro (su manejador lo lleva al despachador en una frontera de instrucción), espera a que no quede ninguno, vacía y despierta a los que esperan en la barrera.
 
+## Procesos y `execve`
+
+`fork` y `vfork` se emulan como `fork`: el hijo es una copia del proceso entero, calco incluido, y sigue traducido. `execve` (`src/syscall/mod.rs`) comprueba primero el archivo con `loader::resolve`, así el invitado recibe el mismo errno que daría el kernel (`ENOENT`, `EACCES`, `ENOEXEC`) y sigue corriendo. Si el archivo es ejecutable, calco se vuelve a ejecutar a sí mismo —la ruta de `/proc/self/exe` que leyó al arrancar— con `--argv0 <argv[0]> -- <ruta> <args…>` y el entorno del invitado, y el programa nuevo también corre traducido. Una ruta `/proc/self/exe` del invitado significa su propio programa, no calco.
+
+Si lo que el invitado ejecuta es el propio binario de calco (mismo dispositivo e inodo, siguiendo enlaces), calco lo ejecuta tal cual, sin envolverlo: es lo que pasa cuando un programa traducido ejecuta un envoltorio `exec calco … PROGRAMA`, como el de la suite de busybox. Un calco traducido por otro calco pondría la pila y la caché del invitado interno en las mismas direcciones que las del externo, y el calco interno ya traduce `PROGRAMA`.
+
+El kernel nombra el proceso (`/proc/PID/comm`) por el archivo que ejecutó, que es calco. Al arrancar, calco cambia ese nombre con `prctl(PR_SET_NAME)` por el último componente del `argv[0]` del invitado, que es lo que buscan `ps`, `pidof` y `killall`.
+
 ## Código automodificable
 
 `src/smc.rs` lleva la cuenta de qué páginas del invitado tienen código traducido: cada bloque se anota en las páginas que tocan sus bytes (una, o dos si la última instrucción cruza). La primera vez que se traduce desde una página que el invitado puede escribir, calco le **quita la escritura en el anfitrión**.
@@ -110,3 +153,21 @@ Lo mismo se aplica, sin falla, a los rangos que tocan `munmap`, `mprotect` sin e
 El arnés (`harness/`, sección 4 del contrato) usa el CPU como oráculo. `harness/gen.py` genera, con semillas fijas, casos de 1 a 16 instrucciones a partir de `isa/scope.tsv`, con memoria acotada a un búfer de 256 bytes, sin fallas por construcción y con un seguimiento de qué flags quedan definidas. `harness/build.py` los ensambla con `as`/`ld` en un ELF estático sin libc que carga el estado inicial, ejecuta cada caso y se vuelca a sí mismo (`pushfq`, registros, `fxsave64`, memoria) por stdout. Ese mismo binario corre en nativo, bajo calco y bajo `qemu-x86_64` (`harness/run.py`), y `harness/compare.py` compara los volcados campo por campo con la máscara de flags indefinidas. `harness/reduce.py` reduce un contraejemplo con ddmin.
 
 Que el arnés detecta fallos se comprueba con seis mutantes: *features* de Cargo de una línea en `src/emit/` o `src/jit/` que estropean una instrucción concreta. Los scripts de `scripts/` cubren el resto de la sección 6 del contrato: las pruebas de QEMU, señales, hilos, SMC, invitados dinámicos, los programas objetivo (busybox, SQLite, Lua, TCC) y `scripts/bench.py`, que mide el rendimiento contra nativo y contra `qemu-x86_64` y deja `build/bench/results.json`.
+
+## Mapa del código
+
+| Archivo | Qué contiene |
+| --- | --- |
+| `src/main.rs` | CLI, nombre del proceso, arranque del hilo principal |
+| `src/loader.rs` | ELF, intérprete, `#!`, pila inicial y auxv |
+| `src/mem.rs` | Intervalos del invitado, permisos lógicos, colocación, `brk` |
+| `src/cpu.rs` | `struct Cpu` y sus desplazamientos fijos |
+| `src/decode/` | Decodificador y tablas del alcance |
+| `src/emit/` | Codificador x86-64 del anfitrión y `recode` |
+| `src/jit/translate.rs` | Traducción de un bloque, sonda de saltos indirectos, tabla de pc |
+| `src/jit/mod.rs` | Arena, `BlockMap`, `LookupTable`, encadenamiento, invalidación, despachador |
+| `src/jit/trampoline.rs` | Trampolines de entrada y salida |
+| `src/syscall/` | Lista cerrada de llamadas al sistema, emulaciones, `execve` |
+| `src/signal/` | Acciones, manejador del anfitrión, marcos, llamadas seguras |
+| `src/thread.rs` | `clone`, lista de hilos, punto seguro |
+| `src/smc.rs` | Páginas con traducciones y su protección |

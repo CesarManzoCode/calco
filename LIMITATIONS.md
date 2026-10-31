@@ -65,10 +65,13 @@ Fuente única de lo que calco no demuestra o no hace. Ningún otro archivo los r
 - `mmap` ignora `MAP_32BIT`: la colocación sin dirección fija siempre usa la ventana del invitado.
 - `readlink` solo reescribe `/proc/self/exe` y `/proc/thread-self/exe`; `/proc/<pid>/exe` muestra a calco.
 - `prctl` solo acepta `PR_SET_NAME`, `PR_GET_NAME` y `PR_SET_PDEATHSIG`; el resto devuelve `EINVAL`.
+- El nombre del proceso (`/proc/PID/comm`) es el último componente del `argv[0]` del invitado; el kernel usa el nombre del archivo ejecutado, que casi siempre coincide pero no siempre. `/proc/PID/cmdline` y `/proc/PID/exe` siguen mostrando a calco.
+- Un invitado que ejecuta el binario de calco no lo corre traducido: calco lo ejecuta tal cual, y es ese calco el que traduce el programa que recibe.
 
 ## Mediciones
 
 - Todas las mediciones son de una sola máquina, sin root, sin aislar el sistema más allá de fijar un núcleo.
 - La comparación con nativo es un costo de traducción, no una comparación de velocidad entre iguales.
 - En K1 el código de verificación era mayor que el del traductor (`python3 scripts/loc.py`: `traductor: 3927`, `verificacion: 4450`). En el cierre de K2 el criterio «arnés menor que traductor» pasa, pero los conteos de ese cierre no quedaron registrados.
+- En K3 el código de verificación vuelve a ser mayor que el del traductor: tras el arreglo de k3, `python3 scripts/loc.py` da `traductor: 6725` y `verificacion: 7694` (el conteo del checker da 6647 y 7528), así que el criterio `k1.loc` no se cumple. K3 añadió sobre todo verificación (scripts de los programas objetivo, `bench.py` y sus pruebas, pruebas de la sonda de saltos indirectos) y poco traductor. No se recortaron pruebas ni se cambió la forma de contar.
 - `testthread` se compara por hilo y como multiconjunto de líneas, porque su orden global no es estable ni en nativo.

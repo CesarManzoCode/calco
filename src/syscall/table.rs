@@ -131,6 +131,8 @@ pub const PASS: &[(u64, &str)] = &[
     (81, "fchdir"),
     (83, "mkdir"),
     (258, "mkdirat"),
+    (133, "mknod"),
+    (259, "mknodat"),
     (84, "rmdir"),
     (87, "unlink"),
     (263, "unlinkat"),

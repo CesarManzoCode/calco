@@ -629,6 +629,12 @@ fn probe_hit(entry: u64, target: u64) -> Option<u32> {
     (ecx == 0).then_some((entry >> 32) as u32)
 }
 
+/// Where the code of the probe ends for `target`: the block of a hit, or `exit` when it
+/// leaves through the indirect exit on a miss.
+fn probe_end(entry: u64, target: u64, exit: u32) -> u32 {
+    probe_hit(entry, target).unwrap_or(exit)
+}
+
 #[test]
 fn lookup_entries_are_indexed_by_the_low_bits_and_published_whole() {
     assert!(LOOKUP_SLOTS.is_power_of_two());
@@ -643,7 +649,7 @@ fn lookup_entries_are_indexed_by_the_low_bits_and_published_whole() {
     assert_eq!(lookup_slot(rip), 0x1234);
     // Free slots send every target to the indirect exit, low rips included.
     for target in [rip, 0x1234, 0, 0x40_0000] {
-        assert_eq!(probe_hit(table.get(target), target), Some(EXIT));
+        assert_eq!(probe_end(table.get(target), target, EXIT), EXIT);
     }
     table.set(rip, 0x4560);
     let entry = table.get(rip);
@@ -662,7 +668,7 @@ fn lookup_entries_are_indexed_by_the_low_bits_and_published_whole() {
     assert_eq!(probe_hit(table.get(rip), rip), None);
     assert_eq!(probe_hit(table.get(rip), rip + 0x1_0000), Some(0x8000));
     // Other slots are untouched.
-    assert_eq!(probe_hit(table.get(rip + 1), rip + 1), Some(EXIT));
+    assert_eq!(probe_end(table.get(rip + 1), rip + 1, EXIT), EXIT);
 }
 
 #[test]
@@ -676,7 +682,7 @@ fn invalidating_and_flushing_empty_the_lookup_table() {
     table.remove(a, 0x180);
     assert_eq!(probe_hit(table.get(a), a), Some(0x100));
     table.remove(a, 0x100);
-    assert_eq!(probe_hit(table.get(a), a), Some(EXIT));
+    assert_eq!(probe_end(table.get(a), a, EXIT), EXIT);
     assert_eq!(probe_hit(table.get(b), b), Some(0x200));
     // Replaced by another rip, then that rip's old block is invalidated: the new one stays.
     table.set(b + 0x1_0000, 0x300);
@@ -684,6 +690,6 @@ fn invalidating_and_flushing_empty_the_lookup_table() {
     assert_eq!(probe_hit(table.get(b), b + 0x1_0000), Some(0x300));
     table.clear();
     for rip in [a, b, b + 0x1_0000] {
-        assert_eq!(probe_hit(table.get(rip), rip), Some(EXIT));
+        assert_eq!(probe_end(table.get(rip), rip, EXIT), EXIT);
     }
 }

@@ -30,6 +30,7 @@ pub const SYS_RT_SIGTIMEDWAIT: usize = 128;
 pub const SYS_RT_SIGQUEUEINFO: usize = 129;
 pub const SYS_RT_SIGSUSPEND: usize = 130;
 pub const SYS_SIGALTSTACK: usize = 131;
+pub const SYS_PRCTL: usize = 157;
 pub const SYS_GETTID: usize = 186;
 pub const SYS_FUTEX: usize = 202;
 pub const SYS_EXIT_GROUP: usize = 231;
@@ -340,6 +341,16 @@ pub fn access_exec(path: &[u8]) -> Result<(), i32> {
         )
     };
     check(ret).map(|_| ())
+}
+
+/// Names the calling thread `name` (`prctl(PR_SET_NAME)`); the kernel keeps the first 15
+/// bytes.
+pub fn set_name(name: &[u8]) {
+    const PR_SET_NAME: usize = 15;
+    let mut comm = [0u8; 16];
+    let n = name.len().min(15);
+    comm[..n].copy_from_slice(&name[..n]);
+    unsafe { syscall2(SYS_PRCTL, PR_SET_NAME, comm.as_ptr() as usize) };
 }
 
 /// Replaces this process by `path` with `argv` and `envp`. Returns only on failure,

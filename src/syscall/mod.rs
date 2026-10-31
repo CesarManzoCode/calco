@@ -26,6 +26,7 @@ use std::ffi::OsStr;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -203,6 +204,12 @@ fn read_strings(mem: &Mem, addr: u64) -> Result<Vec<Vec<u8>>, i32> {
 
 fn is_proc_self_exe(path: &[u8]) -> bool {
     path == b"/proc/self/exe" || path == b"/proc/thread-self/exe"
+}
+
+/// Whether paths `a` and `b` name the same file, following symlinks.
+pub fn same_file(a: &[u8], b: &[u8]) -> bool {
+    let stat = |p: &[u8]| std::fs::metadata(OsStr::from_bytes(p)).map(|m| (m.dev(), m.ino()));
+    matches!((stat(a), stat(b)), (Ok(x), Ok(y)) if x == y)
 }
 
 /// Host argv that runs calco again on `path` with the guest `argv` (contract 3.10). An
@@ -383,6 +390,12 @@ impl State {
             (Ok(argv), Ok(envp)) => (argv, envp),
             (Err(e), _) | (_, Err(e)) => return err(e),
         };
+        // A guest that runs calco itself (a wrapper `exec calco … PROGRAM`) gets it as it
+        // is: calco under calco would put the inner guest on top of the outer one, and the
+        // inner calco already translates PROGRAM.
+        if same_file(&path, &self.calco) {
+            return err(sys::execve(&path, &argv, &envp));
+        }
         let host_argv = reexec_argv(&self.calco, &path, &argv);
         err(sys::execve(&self.calco, &host_argv, &envp))
     }

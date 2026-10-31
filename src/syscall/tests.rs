@@ -94,6 +94,7 @@ fn classification_of_numbers() {
         (MADVISE, Kind::Emulated),
         (29, Kind::Pass),
         (31, Kind::Pass),
+        (259, Kind::Pass),
         (SHMAT, Kind::Emulated),
         (SHMDT, Kind::Emulated),
         (WAIT4, Kind::Emulated),
@@ -197,6 +198,19 @@ fn reexec_runs_calco_on_the_program_with_the_guest_argv() {
     assert_eq!(reexec_argv(b"/opt/calco", b"./exec", &argv), want);
     let want: [&[u8]; 5] = [b"/opt/calco", b"--argv0", b"", b"--", b"-x"];
     assert_eq!(reexec_argv(b"/opt/calco", b"-x", &[]), want);
+}
+
+#[test]
+fn a_symlink_to_calco_is_calco() {
+    let exe = std::env::current_exe().unwrap();
+    let link = exe.with_file_name("calco-k3-fix-link");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&exe, &link).unwrap();
+    let (exe, link) = (exe.as_os_str().as_bytes(), link.as_os_str().as_bytes());
+    assert!(same_file(link, exe));
+    assert!(!same_file(b"/etc/passwd", exe));
+    assert!(!same_file(b"/nonexistent/calco", b"/nonexistent/calco"));
+    std::fs::remove_file(OsStr::from_bytes(link)).unwrap();
 }
 
 #[test]

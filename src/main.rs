@@ -62,6 +62,11 @@ fn parse_args(raw: Vec<OsString>) -> Result<Args, String> {
     })
 }
 
+/// Last path component of `argv0`, the name the guest process goes by.
+fn process_name(argv0: &[u8]) -> &[u8] {
+    argv0.rsplit(|&b| b == b'/').next().unwrap_or(argv0)
+}
+
 fn main() {
     let args = parse_args(env::args_os().skip(1).collect()).unwrap_or_else(|e| fail(&e));
     let mut argv = vec![
@@ -70,6 +75,9 @@ fn main() {
             .into_vec(),
     ];
     argv.extend(args.args.into_iter().map(OsStringExt::into_vec));
+    // The kernel named this process after calco; `ps`, `pidof` and `killall` look for the
+    // guest, which is the last component of its argv[0].
+    sys::set_name(process_name(&argv[0]));
     let envp: Vec<Vec<u8>> = env::vars_os()
         .map(|(key, value)| {
             let mut entry = key.into_vec();
