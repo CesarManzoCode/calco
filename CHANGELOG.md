@@ -1,5 +1,31 @@
 # Cambios
 
+## k3 — 2026-10-31
+
+- **busybox, SQLite, Lua y TCC corren bajo calco con la misma salida que en nativo.** Se compilan de fuente fijada: busybox estático; SQLite, Lua y TCC dinámicos con la glibc del sistema. Descartado: usar los binarios de la distro. Por qué: compilados de fuente, el binario es el mismo en nativo, en qemu-x86_64 y en calco. Efecto medido:
+  - Los 64 casos de busybox (55 applets) dan la misma salida que en nativo.
+  - La suite propia de busybox da 903 `PASS` de 903 en el subconjunto que pasa en nativo.
+  - `targets/sqlite/workload.sql` da la misma salida y el mismo sha256 de la base.
+  - Los 9 scripts de Lua dan la misma salida.
+  - El `tcc1` que TCC produce bajo calco tiene el mismo sha256 que el de nativo.
+- **Los saltos y llamadas indirectos y los `ret` buscan su destino en línea**, en una tabla de 65 536 entradas, sin escribir flags ni tocar la pila del invitado. Si la búsqueda falla, salen al despachador. Descartado: salir siempre al despachador, como en K1 y K2. Por qué: cada `ret` y cada salto indirecto pasaba por Rust. Efecto medido: no se midió por separado; con la búsqueda en línea, la media geométrica calco/qemu-x86_64 de las cinco cargas es 0.3241.
+- **calco es más rápido que qemu-x86_64 en las cinco cargas fijas de rendimiento.** Descartado: medir sin fijar núcleo ni calentar. Por qué: el contrato fija `taskset -c 2`, 1 corrida de calentamiento y 5 medidas. Efecto medido:
+  - calco/qemu = 0.3241 (umbral ≤ 0.5). Por carga va de 0.2228 en lua a 0.4950 en sqlite.
+  - calco/nativo = 2.2636.
+  - El RSS máximo de calco es 52 004 KiB, con un límite de 1 GiB.
+- **`mknod` y `mknodat` pasan directo al kernel.** Descartado: devolver `ENOSYS`, como antes. Por qué: `mkfifo` de busybox fallaba. Efecto medido: forma parte del arreglo que llevó la suite de busybox de 878 a 903 `PASS` (el subconjunto pasó de 902 a 903).
+- **Un invitado que ejecuta el binario de calco lo ejecuta tal cual, sin traducirlo.** Descartado: traducir calco con calco. Por qué: la pila del invitado interno chocaba con la del externo (`cannot map the guest stack`) en `xargs`, `find -exec`, `tar -z`, `start-stop-daemon` y `taskset` de la suite de busybox. Efecto medido: esas pruebas pasan, dentro de los 903 `PASS`.
+- **El proceso se llama como el `argv[0]` del invitado.** Descartado: dejarlo como `calco`. Por qué: `pidof` no encontraba al invitado. Efecto medido: `pidof` pasa en la suite, y `tests/process_name.rs` pasa.
+- **El diseño del JIT queda documentado en `vault/JIT.md`.** Descartado: dejarlo solo en el contrato. Por qué: el contrato fija decisiones y no explica cómo se recorre un bloque. Efecto medido: 173 líneas con las secciones pedidas.
+- **El código de verificación vuelve a ser menor que el del traductor, tras recortar pruebas redundantes.** Se recortó por indicación de César. Descartado: cambiar la forma de contar o inflar el traductor. Por qué: K3 añadió sobre todo verificación, y el criterio fallaba con `traductor 6725`, `verificacion 7694`. Efecto medido: `scripts/loc.py` da `traductor 6725`, `verificacion 6711`. Las pruebas unitarias de Rust bajan de 107 a 104.
+- **La primera verificación del cierre falló y se corrigió.** Descartado: aceptar el cierre con fallos. Por qué: fallaban cuatro cosas:
+  - `make check`, por dos pruebas de la búsqueda en línea que pedían algo imposible con el formato de la tabla.
+  - La suite de busybox (`native 902, calco 878`).
+  - `vault/JIT.md`, que tenía menos de 150 líneas.
+  - `k1.loc`.
+
+  Efecto medido: después pasan los 10 criterios de K3, y también los 13 de K0, los 16 de K1 y los 9 de K2.
+
 ## k2 — 2026-10-30
 
 - **`execve` vuelve a ejecutar a calco sobre el programa nuevo, con el argv y el entorno del invitado.** Descartado: pasar `execve` al kernel. Por qué: el programa nuevo correría nativo, sin traducir. Efecto medido: la salida de `guests/exec.c` bajo calco es igual a `guests/exec.expected`, y el hijo también corre traducido.
