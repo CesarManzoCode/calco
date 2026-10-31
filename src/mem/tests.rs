@@ -15,10 +15,8 @@ fn insert_merges_adjacent_same_prot() {
     iv.insert(0x3000, 0x5000, RW);
     assert_eq!(iv.regions(), vec![region(0x1000, 0x5000, RW)]);
     iv.insert(0x5000, 0x6000, R);
-    assert_eq!(
-        iv.regions(),
-        vec![region(0x1000, 0x5000, RW), region(0x5000, 0x6000, R)]
-    );
+    let want = vec![region(0x1000, 0x5000, RW), region(0x5000, 0x6000, R)];
+    assert_eq!(iv.regions(), want);
 }
 
 #[test]
@@ -43,16 +41,12 @@ fn remove_splits() {
     let mut iv = Intervals::new();
     iv.insert(0x10000, 0x20000, RW);
     iv.remove(0x12000, 0x13000);
-    assert_eq!(
-        iv.regions(),
-        vec![region(0x10000, 0x12000, RW), region(0x13000, 0x20000, RW)]
-    );
+    let want = vec![region(0x10000, 0x12000, RW), region(0x13000, 0x20000, RW)];
+    assert_eq!(iv.regions(), want);
     iv.remove(0x0, 0x11000);
     iv.remove(0x1f000, 0x30000);
-    assert_eq!(
-        iv.regions(),
-        vec![region(0x11000, 0x12000, RW), region(0x13000, 0x1f000, RW)]
-    );
+    let want = vec![region(0x11000, 0x12000, RW), region(0x13000, 0x1f000, RW)];
+    assert_eq!(iv.regions(), want);
 }
 
 #[test]
@@ -60,10 +54,8 @@ fn gaps_covers_and_find() {
     let mut iv = Intervals::new();
     iv.insert(0x2000, 0x4000, R);
     iv.insert(0x6000, 0x7000, RW);
-    assert_eq!(
-        iv.gaps(0x1000, 0x8000),
-        vec![(0x1000, 0x2000), (0x4000, 0x6000), (0x7000, 0x8000)]
-    );
+    let want = vec![(0x1000, 0x2000), (0x4000, 0x6000), (0x7000, 0x8000)];
+    assert_eq!(iv.gaps(0x1000, 0x8000), want);
     assert!(iv.covers(0x2000, 0x4000));
     assert!(!iv.covers(0x2000, 0x5000));
     assert!(iv.overlaps(0x3000, 0x6001));
@@ -94,11 +86,8 @@ fn layout_follows_brk() {
     let mut mem = Mem::new();
     mem.set_brk_base(0x40_1000);
     assert_eq!(mem.code_cache(), 0x4060_0000);
-    assert_eq!(mem.code_cache() % (2 << 20), 0);
-    assert_eq!(
-        mem.window_start(),
-        mem.code_cache() + CODE_CACHE_SIZE + (16 << 20)
-    );
+    let window = mem.code_cache() + CODE_CACHE_SIZE + (16 << 20);
+    assert_eq!(mem.window_start(), window);
 }
 
 // The real-mapping tests use fixed addresses far from where the kernel places anything
@@ -111,10 +100,8 @@ fn map_fixed_over_foreign_range_is_enomem() {
     let mut mem = Mem::new();
     let flags = MAP_PRIVATE | MAP_FIXED;
     assert_eq!(mem.map_anon(host, PAGE_SIZE, RW, flags), Err(ENOMEM));
-    assert_eq!(
-        mem.map_anon(host, PAGE_SIZE, RW, MAP_PRIVATE | MAP_FIXED_NOREPLACE),
-        Err(ENOMEM)
-    );
+    let noreplace = MAP_PRIVATE | MAP_FIXED_NOREPLACE;
+    assert_eq!(mem.map_anon(host, PAGE_SIZE, RW, noreplace), Err(ENOMEM));
     assert_eq!(unsafe { (host as *const u8).read() }, 0xa5);
     assert!(mem.intervals.regions().is_empty());
     unsafe { sys::munmap(host, PAGE_SIZE) }.unwrap();
@@ -138,15 +125,11 @@ fn map_fixed_over_guest_range_replaces() {
             region(mid + PAGE_SIZE, base + 3 * PAGE_SIZE, RW),
         ]
     );
-    assert_eq!(
-        mem.map_anon(base, PAGE_SIZE, RW, MAP_PRIVATE | MAP_FIXED_NOREPLACE),
-        Err(EEXIST)
-    );
+    let noreplace = MAP_PRIVATE | MAP_FIXED_NOREPLACE;
+    assert_eq!(mem.map_anon(base, PAGE_SIZE, RW, noreplace), Err(EEXIST));
     mem.protect(mid, PAGE_SIZE, RW).unwrap();
-    assert_eq!(
-        mem.intervals.regions(),
-        vec![region(base, base + 3 * PAGE_SIZE, RW)]
-    );
+    let whole = vec![region(base, base + 3 * PAGE_SIZE, RW)];
+    assert_eq!(mem.intervals.regions(), whole);
     mem.unmap(mid, PAGE_SIZE).unwrap();
     assert_eq!(mem.intervals.regions().len(), 2);
     assert_eq!(mem.protect(base, 3 * PAGE_SIZE, R), Err(ENOMEM));
@@ -173,19 +156,17 @@ fn brk_grows_shrinks_and_respects_limit() {
     mem.set_brk_base(base);
     assert_eq!(mem.brk(0), base);
     assert_eq!(mem.brk(base + BRK_LIMIT + 1), base);
+    assert_eq!(mem.brk(base + BRK_LIMIT), base + BRK_LIMIT);
     let top = base + 3 * PAGE_SIZE;
     assert_eq!(mem.brk(top), top);
     unsafe { ((top - 1) as *mut u8).write(1) };
-    assert_eq!(
-        mem.intervals.find(top - 1).map(|r| r.prot),
-        Some(PROT_READ | PROT_WRITE)
-    );
+    assert_eq!(mem.intervals.find(top - 1).map(|r| r.prot), Some(RW));
     assert_eq!(mem.brk(base), base);
     assert_eq!(mem.intervals.find(top - 1), None);
 }
 
 /// Permissions of the host mapping that starts at `addr`, from `/proc/self/maps`.
-fn host_perms(addr: u64) -> Option<String> {
+pub(crate) fn host_perms(addr: u64) -> Option<String> {
     let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
     let start = format!("{addr:x}-");
     let line = maps.lines().find(|l| l.starts_with(&start))?;
@@ -208,10 +189,8 @@ fn shm_attaches_in_the_window_without_host_exec() {
     let a = mem.attach_shm(id, 0, 0).unwrap();
     assert_eq!(a, mem.window_start());
     assert_eq!(mem.shm_len(a), Some(3 * PAGE_SIZE));
-    assert_eq!(
-        mem.intervals.find(a).map(|r| (r.end, r.prot)),
-        Some((a + 3 * PAGE_SIZE, RW))
-    );
+    let found = mem.intervals.find(a).map(|r| (r.end, r.prot));
+    assert_eq!(found, Some((a + 3 * PAGE_SIZE, RW)));
     unsafe { ((a + PAGE_SIZE) as *mut u8).write(0x5a) };
 
     // A fixed address, rounded, read-only and executable for the guest only.

@@ -10,7 +10,6 @@ of the workload apply. The raw outputs stay in build/sqlite/{native,calco}.out.
 """
 
 import argparse
-import hashlib
 import signal
 from pathlib import Path
 
@@ -41,28 +40,6 @@ def run_workload(db, sql, prefix=()):
                       env=ENV, timeout=TIMEOUT, cwd=OUT)
 
 
-def sha256(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
-
-
-def differences(native, calco, native_hash, calco_hash):
-    problems = []
-    if native.returncode != calco.returncode:
-        problems.append(f"native ended with {native.describe()}, calco with {calco.describe()}")
-    if native.stdout != calco.stdout:
-        problems.append("stdout differs")
-    if native.stderr != calco.stderr:
-        problems.append("stderr differs")
-    if native_hash != calco_hash:
-        problems.append(f"database sha256 differs: native {native_hash}, calco {calco_hash}")
-    return problems
-
-
-def save(path, res):
-    path.write_bytes(res.stdout + b"\n--- stderr ---\n" + res.stderr
-                     + f"\n--- {res.describe()} ---\n".encode())
-
-
 def main():
     common.require_non_root()
     parser = argparse.ArgumentParser()
@@ -77,16 +54,19 @@ def main():
 
     native_db = fresh_db("native")
     native = run_workload(native_db, args.sql)
-    save(OUT / "native.out", native)
+    common.save(OUT / "native.out", native)
     if native.returncode != 0:
         common.fail(f"native sqlite3 ended with {native.describe()}; see {OUT / 'native.out'}")
     calco_db = fresh_db("calco")
     under = run_workload(calco_db, args.sql, prefix=(calco,))
-    save(OUT / "calco.out", under)
+    common.save(OUT / "calco.out", under)
 
-    native_hash = sha256(native_db)
-    calco_hash = sha256(calco_db) if calco_db.exists() else "missing"
-    problems = differences(native, under, native_hash, calco_hash)
+    if not native_db.exists():
+        common.fail(f"native sqlite3 left no database {native_db}")
+    native_hash, calco_hash = common.sha256(native_db), common.sha256(calco_db)
+    problems = common.differences(native, under)
+    if native_hash != calco_hash:
+        problems.append(f"database sha256 differs: native {native_hash}, calco {calco_hash}")
     lines = native.stdout.count(b"\n")
     if problems:
         common.fail(f"{args.sql.name}: {'; '.join(problems)}; outputs in {OUT}")

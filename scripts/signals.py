@@ -11,15 +11,7 @@ def main():
 
     native = common.run([guest])
     res = common.run_calco(calco, guest)
-    ok = True
-    for what in ("stdout", "stderr"):
-        if getattr(res, what) != getattr(native, what):
-            print(f"{what}: {getattr(res, what)!r}, native {getattr(native, what)!r}")
-            ok = False
-    if res.returncode != native.returncode:
-        print(f"ended with {res.describe()}, native {native.describe()}")
-        ok = False
-    if not ok:
+    if not common.same_as_native(native, res):
         common.fail("calco differs from native")
     print("senales-igual-a-nativo")
 

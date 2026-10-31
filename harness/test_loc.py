@@ -38,17 +38,12 @@ class Count(unittest.TestCase):
 
 
 class Side(unittest.TestCase):
-    def test_translator(self):
-        self.assertEqual(loc.side(Path("src/main.rs")), "traductor")
-        self.assertEqual(loc.side(Path("src/jit/translate.rs")), "traductor")
-
-    def test_tests_rs_is_verification(self):
-        self.assertEqual(loc.side(Path("src/jit/tests.rs")), "verificacion")
-        self.assertEqual(loc.side(Path("src/cpu/tests.rs")), "verificacion")
-
-    def test_verification_dirs(self):
-        for rel in ("harness/gen.py", "scripts/loc.py", "guests/hello.c", "guests/asm/basic.S",
-                    "tests/jit_basic.rs", "scripts/x.sh", "guests/x.s"):
+    def test_translator_and_verification(self):
+        for rel in ("src/main.rs", "src/jit/translate.rs"):
+            self.assertEqual(loc.side(Path(rel)), "traductor", rel)
+        for rel in ("src/jit/tests.rs", "src/cpu/tests.rs", "harness/gen.py", "scripts/loc.py",
+                    "guests/hello.c", "guests/asm/basic.S", "tests/jit_basic.rs", "scripts/x.sh",
+                    "guests/x.s"):
             self.assertEqual(loc.side(Path(rel)), "verificacion", rel)
 
     def test_not_counted(self):

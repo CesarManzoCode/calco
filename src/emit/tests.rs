@@ -20,82 +20,45 @@ fn recode(bytes: &[u8], host: u64, rw: MemRewrite) -> Result<Vec<u8>, OutOfRange
 }
 
 #[test]
-fn gs_forms() {
+fn gs_mov_lea_xchg_and_state_forms() {
     // scratch[0] = 0x2a0, scratch[1] = 0x2a8, next_rip = 0x2d0, gs_base = 0x98.
-    assert_eq!(
-        emit(|a| a.mov_gs_store(off_scratch(0), RAX)),
-        [0x65, 0x48, 0x89, 0x04, 0x25, 0xa0, 0x02, 0x00, 0x00]
-    );
-    assert_eq!(
-        emit(|a| a.mov_gs_store(off_scratch(0), R11)),
-        [0x65, 0x4c, 0x89, 0x1c, 0x25, 0xa0, 0x02, 0x00, 0x00]
-    );
-    assert_eq!(
-        emit(|a| a.mov_gs_load(RSI, OFF_GS_BASE)),
-        [0x65, 0x48, 0x8b, 0x34, 0x25, 0x98, 0x00, 0x00, 0x00]
-    );
-    assert_eq!(
-        emit(|a| a.mov_gs_load(R13, off_scratch(1))),
-        [0x65, 0x4c, 0x8b, 0x2c, 0x25, 0xa8, 0x02, 0x00, 0x00]
-    );
-    assert_eq!(
-        emit(|a| a.mov_gs_dword(OFF_NEXT_RIP, 0x1234_5678)),
-        [
-            0x65, 0xc7, 0x04, 0x25, 0xd0, 0x02, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12
-        ]
-    );
-    assert_eq!(
-        emit(|a| a.pop_gs(OFF_NEXT_RIP)),
-        [0x65, 0x8f, 0x04, 0x25, 0xd0, 0x02, 0x00, 0x00]
-    );
-}
-
-#[test]
-fn mov_lea_and_xchg_forms() {
-    assert_eq!(
-        emit(|a| a.mov_imm64(RAX, 0x1122_3344_5566_7788)),
-        [0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11]
-    );
-    assert_eq!(
-        emit(|a| a.mov_imm64(R11, 1)),
-        [0x49, 0xbb, 1, 0, 0, 0, 0, 0, 0, 0]
-    );
-    assert_eq!(
-        emit(|a| a.lea(RSP, &Mem::base(RSP, -8))),
-        [0x48, 0x8d, 0x64, 0x24, 0xf8]
-    );
-    assert_eq!(
-        emit(|a| a.lea(RSI, &Mem::base_index(RSI, RAX))),
-        [0x48, 0x8d, 0x34, 0x06]
-    );
-    // [r13] needs a disp8 and REX.B; REX.R for r11.
-    assert_eq!(
-        emit(|a| a.lea(R11, &Mem::base_index(R13, RAX))),
-        [0x4d, 0x8d, 0x5c, 0x05, 0x00]
-    );
-    // [r12] needs a SIB.
-    assert_eq!(
-        emit(|a| a.lea(RAX, &Mem::base(R12, 0))),
-        [0x49, 0x8d, 0x04, 0x24]
-    );
-    assert_eq!(
-        emit(|a| a.lea(RCX, &Mem::base(RBP, 0x100))),
-        [0x48, 0x8d, 0x8d, 0x00, 0x01, 0x00, 0x00]
-    );
-    assert_eq!(
-        emit(|a| a.mov_store_imm(&Mem::base(RSP, -8), 0x40_1000)),
-        [0x48, 0xc7, 0x44, 0x24, 0xf8, 0x00, 0x10, 0x40, 0x00]
-    );
-    assert_eq!(
-        emit(|a| a.mov_store(&Mem::base(RSP, -8), RAX)),
-        [0x48, 0x89, 0x44, 0x24, 0xf8]
-    );
-    assert_eq!(
-        emit(|a| a.mov_load(RAX, &Mem::base(RSP, 0))),
-        [0x48, 0x8b, 0x04, 0x24]
-    );
-    assert_eq!(emit(|a| a.mov_rr(R8, RAX)), [0x49, 0x89, 0xc0]);
-    assert_eq!(emit(|a| a.xchg(RAX, R11)), [0x4c, 0x87, 0xd8]);
+    #[rustfmt::skip]
+    let cases: &[(Vec<u8>, &[u8])] = &[
+        (emit(|a| a.mov_gs_store(off_scratch(0), RAX)), &[0x65, 0x48, 0x89, 0x04, 0x25, 0xa0, 0x02, 0x00, 0x00]),
+        (emit(|a| a.mov_gs_store(off_scratch(0), R11)), &[0x65, 0x4c, 0x89, 0x1c, 0x25, 0xa0, 0x02, 0x00, 0x00]),
+        (emit(|a| a.mov_gs_load(RSI, OFF_GS_BASE)), &[0x65, 0x48, 0x8b, 0x34, 0x25, 0x98, 0x00, 0x00, 0x00]),
+        (emit(|a| a.mov_gs_load(R13, off_scratch(1))), &[0x65, 0x4c, 0x8b, 0x2c, 0x25, 0xa8, 0x02, 0x00, 0x00]),
+        (emit(|a| a.mov_gs_dword(OFF_NEXT_RIP, 0x1234_5678)),
+         &[0x65, 0xc7, 0x04, 0x25, 0xd0, 0x02, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12]),
+        (emit(|a| a.pop_gs(OFF_NEXT_RIP)), &[0x65, 0x8f, 0x04, 0x25, 0xd0, 0x02, 0x00, 0x00]),
+        (emit(|a| a.mov_imm64(RAX, 0x1122_3344_5566_7788)), &[0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11]),
+        (emit(|a| a.mov_imm64(R11, 1)), &[0x49, 0xbb, 1, 0, 0, 0, 0, 0, 0, 0]),
+        (emit(|a| a.lea(RSP, &Mem::base(RSP, -8))), &[0x48, 0x8d, 0x64, 0x24, 0xf8]),
+        (emit(|a| a.lea(RSI, &Mem::base_index(RSI, RAX))), &[0x48, 0x8d, 0x34, 0x06]),
+        // [r13] needs a disp8 and REX.B; REX.R for r11.
+        (emit(|a| a.lea(R11, &Mem::base_index(R13, RAX))), &[0x4d, 0x8d, 0x5c, 0x05, 0x00]),
+        // [r12] needs a SIB.
+        (emit(|a| a.lea(RAX, &Mem::base(R12, 0))), &[0x49, 0x8d, 0x04, 0x24]),
+        (emit(|a| a.lea(RCX, &Mem::base(RBP, 0x100))), &[0x48, 0x8d, 0x8d, 0x00, 0x01, 0x00, 0x00]),
+        (emit(|a| a.mov_store_imm(&Mem::base(RSP, -8), 0x40_1000)), &[0x48, 0xc7, 0x44, 0x24, 0xf8, 0x00, 0x10, 0x40, 0x00]),
+        (emit(|a| a.mov_store(&Mem::base(RSP, -8), RAX)), &[0x48, 0x89, 0x44, 0x24, 0xf8]),
+        (emit(|a| a.mov_load(RAX, &Mem::base(RSP, 0))), &[0x48, 0x8b, 0x04, 0x24]),
+        (emit(|a| a.mov_rr(R8, RAX)), &[0x49, 0x89, 0xc0]),
+        (emit(|a| a.xchg(RAX, R11)), &[0x4c, 0x87, 0xd8]),
+        (emit(|a| a.pushfq()), &[0x9c]),
+        (emit(|a| a.popfq()), &[0x9d]),
+        (emit(|a| a.fxsave64(&Mem::base(RDI, 160))), &[0x48, 0x0f, 0xae, 0x87, 0xa0, 0x00, 0x00, 0x00]),
+        (emit(|a| a.fxrstor64(&Mem::base(RDI, 160))), &[0x48, 0x0f, 0xae, 0x8f, 0xa0, 0x00, 0x00, 0x00]),
+        (emit(|a| a.wrfsbase(RAX)), &[0xf3, 0x48, 0x0f, 0xae, 0xd0]),
+        (emit(|a| a.rdfsbase(RAX)), &[0xf3, 0x48, 0x0f, 0xae, 0xc0]),
+        (emit(|a| a.wrfsbase(R11)), &[0xf3, 0x49, 0x0f, 0xae, 0xd3]),
+        (emit(|a| a.jrcxz(-2)), &[0xe3, 0xfe]),
+        (emit(|a| a.jmp_rel8(3)), &[0xeb, 0x03]),
+        (emit(|a| a.jmp_rip_mem(0)), &[0xff, 0x25, 0x00, 0x00, 0x00, 0x00]),
+    ];
+    for (k, (got, want)) in cases.iter().enumerate() {
+        assert_eq!(got, want, "case {k}");
+    }
 }
 
 #[test]
@@ -114,13 +77,6 @@ fn jump_forms() {
     a.set_rel32(at, a.pc());
     assert_eq!(a.bytes(), [0xe9, 0x01, 0x00, 0x00, 0x00, 0x90]);
 
-    assert_eq!(emit(|a| a.jrcxz(-2)), [0xe3, 0xfe]);
-    assert_eq!(emit(|a| a.jmp_rel8(3)), [0xeb, 0x03]);
-    assert_eq!(
-        emit(|a| a.jmp_rip_mem(0)),
-        [0xff, 0x25, 0x00, 0x00, 0x00, 0x00]
-    );
-
     // The rel32 of a jmp emitted at 0x1001 lands on 0x1004 after two nops.
     let mut a = Asm::new(0x1001);
     a.pad_for_field(1, 4);
@@ -129,23 +85,6 @@ fn jump_forms() {
     a.align(16);
     assert_eq!(a.len(), 13);
     assert!(a.bytes().iter().all(|&b| b == 0xcc));
-}
-
-#[test]
-fn state_forms() {
-    assert_eq!(emit(|a| a.pushfq()), [0x9c]);
-    assert_eq!(emit(|a| a.popfq()), [0x9d]);
-    assert_eq!(
-        emit(|a| a.fxsave64(&Mem::base(RDI, 160))),
-        [0x48, 0x0f, 0xae, 0x87, 0xa0, 0x00, 0x00, 0x00]
-    );
-    assert_eq!(
-        emit(|a| a.fxrstor64(&Mem::base(RDI, 160))),
-        [0x48, 0x0f, 0xae, 0x8f, 0xa0, 0x00, 0x00, 0x00]
-    );
-    assert_eq!(emit(|a| a.wrfsbase(RAX)), [0xf3, 0x48, 0x0f, 0xae, 0xd0]);
-    assert_eq!(emit(|a| a.rdfsbase(RAX)), [0xf3, 0x48, 0x0f, 0xae, 0xc0]);
-    assert_eq!(emit(|a| a.wrfsbase(R11)), [0xf3, 0x49, 0x0f, 0xae, 0xd3]);
 }
 
 #[test]
@@ -191,11 +130,8 @@ fn keep_reproduces_every_field() {
         &[0xf3, 0xa4],
     ];
     for &bytes in cases {
-        assert_eq!(
-            recode(bytes, 0x5000_0000, MemRewrite::Keep).unwrap(),
-            bytes,
-            "{bytes:02x?}"
-        );
+        let got = recode(bytes, 0x5000_0000, MemRewrite::Keep).unwrap();
+        assert_eq!(got, bytes, "{bytes:02x?}");
     }
 }
 
@@ -203,133 +139,58 @@ fn keep_reproduces_every_field() {
 fn rip_relative_gets_a_new_displacement() {
     // mov rax, [rip+0x10] at 0x401000 reads 0x401017; from 0x500000 that is -0xfeff0.
     let mov = [0x48, 0x8b, 0x05, 0x10, 0x00, 0x00, 0x00];
-    assert_eq!(
-        recode(&mov, 0x50_0000, MemRewrite::RipTarget(0x40_1017)).unwrap(),
-        [0x48, 0x8b, 0x05, 0x10, 0x10, 0xf0, 0xff]
-    );
-    // The immediate is part of the instruction the displacement counts from.
-    assert_eq!(
-        recode(
-            &[0xc7, 0x05, 0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00],
-            0x50_0000,
-            MemRewrite::RipTarget(0x40_101a)
-        )
-        .unwrap(),
-        [0xc7, 0x05, 0x10, 0x10, 0xf0, 0xff, 0x01, 0x00, 0x00, 0x00]
-    );
-    // Mandatory prefix and escape kept: movdqa xmm0, [rip+0x100].
-    assert_eq!(
-        recode(
-            &[0x66, 0x0f, 0x6f, 0x05, 0x00, 0x01, 0x00, 0x00],
-            0x50_0000,
-            MemRewrite::RipTarget(0x40_1108)
-        )
-        .unwrap(),
-        [0x66, 0x0f, 0x6f, 0x05, 0x00, 0x11, 0xf0, 0xff]
-    );
-    // lock add [rip], rax from just below the guest code.
-    assert_eq!(
-        recode(
-            &[0xf0, 0x48, 0x01, 0x05, 0x00, 0x00, 0x00, 0x00],
-            0x40_0000,
-            MemRewrite::RipTarget(0x40_1008)
-        )
-        .unwrap(),
-        [0xf0, 0x48, 0x01, 0x05, 0x00, 0x10, 0x00, 0x00]
-    );
+    #[rustfmt::skip]
+    let cases: &[(&[u8], u64, u64, &[u8])] = &[
+        (&mov, 0x50_0000, 0x40_1017, &[0x48, 0x8b, 0x05, 0x10, 0x10, 0xf0, 0xff]),
+        // The immediate is part of the instruction the displacement counts from.
+        (&[0xc7, 0x05, 0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00], 0x50_0000, 0x40_101a,
+         &[0xc7, 0x05, 0x10, 0x10, 0xf0, 0xff, 0x01, 0x00, 0x00, 0x00]),
+        // Mandatory prefix and escape kept: movdqa xmm0, [rip+0x100].
+        (&[0x66, 0x0f, 0x6f, 0x05, 0x00, 0x01, 0x00, 0x00], 0x50_0000, 0x40_1108,
+         &[0x66, 0x0f, 0x6f, 0x05, 0x00, 0x11, 0xf0, 0xff]),
+        // lock add [rip], rax from just below the guest code.
+        (&[0xf0, 0x48, 0x01, 0x05, 0x00, 0x00, 0x00, 0x00], 0x40_0000, 0x40_1008,
+         &[0xf0, 0x48, 0x01, 0x05, 0x00, 0x10, 0x00, 0x00]),
+    ];
+    for &(bytes, host, target, want) in cases {
+        let got = recode(bytes, host, MemRewrite::RipTarget(target)).unwrap();
+        assert_eq!(got, want, "{bytes:02x?}");
+    }
     // More than 2 GiB away: nothing is emitted.
     let mut a = Asm::new(0x7f00_0000_0000);
     let insn = decode(&mov, GUEST).unwrap();
-    assert_eq!(
-        a.recode(&insn, MemRewrite::RipTarget(0x40_1017)),
-        Err(OutOfRange)
-    );
+    let r = a.recode(&insn, MemRewrite::RipTarget(0x40_1017));
+    assert_eq!(r, Err(OutOfRange));
     assert!(a.is_empty());
 }
 
 #[test]
 fn base_rewrite_replaces_the_memory_operand() {
-    let mov = [0x48, 0x8b, 0x05, 0x10, 0x00, 0x00, 0x00];
-    assert_eq!(
-        recode(&mov, 0x1000, MemRewrite::Base(R11)).unwrap(),
-        [0x49, 0x8b, 0x03]
-    );
-    assert_eq!(
-        recode(&mov, 0x1000, MemRewrite::Base(R13)).unwrap(),
-        [0x49, 0x8b, 0x45, 0x00]
-    );
-    assert_eq!(
-        recode(&mov, 0x1000, MemRewrite::Base(R12)).unwrap(),
-        [0x49, 0x8b, 0x04, 0x24]
-    );
-    assert_eq!(
-        recode(&mov, 0x1000, MemRewrite::Base(RSI)).unwrap(),
-        [0x48, 0x8b, 0x06]
-    );
-    // mov ah, [rip+0x10]: no REX before, none after.
-    assert_eq!(
-        recode(
-            &[0x8a, 0x25, 0x10, 0x00, 0x00, 0x00],
-            0x1000,
-            MemRewrite::Base(RSI)
-        )
-        .unwrap(),
-        [0x8a, 0x26]
-    );
-    // lock xadd gs:[rbx], ecx: gs goes, lock stays.
-    assert_eq!(
-        recode(
-            &[0x65, 0xf0, 0x0f, 0xc1, 0x0b],
-            0x1000,
-            MemRewrite::Base(RSI)
-        )
-        .unwrap(),
-        [0xf0, 0x0f, 0xc1, 0x0e]
-    );
-    // mov gs:[ebx], eax: the address-size prefix goes too.
-    assert_eq!(
-        recode(&[0x65, 0x67, 0x89, 0x03], 0x1000, MemRewrite::Base(RDI)).unwrap(),
-        [0x89, 0x07]
-    );
-    // fs stays: the host FS base is the guest one.
-    assert_eq!(
-        recode(
-            &[0x64, 0x48, 0x8b, 0x05, 0x10, 0x00, 0x00, 0x00],
-            0x1000,
-            MemRewrite::Base(RSI)
-        )
-        .unwrap(),
-        [0x64, 0x48, 0x8b, 0x06]
-    );
-    // moffs becomes the ModRM form.
-    assert_eq!(
-        recode(
-            &[0x65, 0x48, 0xa1, 0x10, 0, 0, 0, 0, 0, 0, 0],
-            0x1000,
-            MemRewrite::Base(RSI)
-        )
-        .unwrap(),
-        [0x48, 0x8b, 0x06]
-    );
-    assert_eq!(
-        recode(
-            &[0x65, 0xa2, 0x10, 0, 0, 0, 0, 0, 0, 0],
-            0x1000,
-            MemRewrite::Base(RSI)
-        )
-        .unwrap(),
-        [0x88, 0x06]
-    );
-    // mov dword gs:[rbx+8], 5 into [r8]: REX.B appears, the immediate follows.
-    assert_eq!(
-        recode(
-            &[0x65, 0xc7, 0x43, 0x08, 0x05, 0x00, 0x00, 0x00],
-            0x1000,
-            MemRewrite::Base(R8)
-        )
-        .unwrap(),
-        [0x41, 0xc7, 0x00, 0x05, 0x00, 0x00, 0x00]
-    );
+    let mov: &[u8] = &[0x48, 0x8b, 0x05, 0x10, 0x00, 0x00, 0x00];
+    #[rustfmt::skip]
+    let cases: &[(&[u8], Reg, &[u8])] = &[
+        (mov, R11, &[0x49, 0x8b, 0x03]),
+        (mov, R13, &[0x49, 0x8b, 0x45, 0x00]),
+        (mov, R12, &[0x49, 0x8b, 0x04, 0x24]),
+        (mov, RSI, &[0x48, 0x8b, 0x06]),
+        // mov ah, [rip+0x10]: no REX before, none after.
+        (&[0x8a, 0x25, 0x10, 0x00, 0x00, 0x00], RSI, &[0x8a, 0x26]),
+        // lock xadd gs:[rbx], ecx: gs goes, lock stays.
+        (&[0x65, 0xf0, 0x0f, 0xc1, 0x0b], RSI, &[0xf0, 0x0f, 0xc1, 0x0e]),
+        // mov gs:[ebx], eax: the address-size prefix goes too.
+        (&[0x65, 0x67, 0x89, 0x03], RDI, &[0x89, 0x07]),
+        // fs stays: the host FS base is the guest one.
+        (&[0x64, 0x48, 0x8b, 0x05, 0x10, 0x00, 0x00, 0x00], RSI, &[0x64, 0x48, 0x8b, 0x06]),
+        // moffs becomes the ModRM form.
+        (&[0x65, 0x48, 0xa1, 0x10, 0, 0, 0, 0, 0, 0, 0], RSI, &[0x48, 0x8b, 0x06]),
+        (&[0x65, 0xa2, 0x10, 0, 0, 0, 0, 0, 0, 0], RSI, &[0x88, 0x06]),
+        // mov dword gs:[rbx+8], 5 into [r8]: REX.B appears, the immediate follows.
+        (&[0x65, 0xc7, 0x43, 0x08, 0x05, 0x00, 0x00, 0x00], R8, &[0x41, 0xc7, 0x00, 0x05, 0x00, 0x00, 0x00]),
+    ];
+    for &(bytes, base, want) in cases {
+        let got = recode(bytes, 0x1000, MemRewrite::Base(base)).unwrap();
+        assert_eq!(got, want, "{bytes:02x?}");
+    }
 }
 
 #[test]

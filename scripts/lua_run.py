@@ -32,22 +32,6 @@ def run_script(script, prefix=()):
                       cwd=script.parent)
 
 
-def differences(native, calco):
-    problems = []
-    if native.returncode != calco.returncode:
-        problems.append(f"native ended with {native.describe()}, calco with {calco.describe()}")
-    if native.stdout != calco.stdout:
-        problems.append("stdout differs")
-    if native.stderr != calco.stderr:
-        problems.append("stderr differs")
-    return problems
-
-
-def save(path, res):
-    path.write_bytes(res.stdout + b"\n--- stderr ---\n" + res.stderr
-                     + f"\n--- {res.describe()} ---\n".encode())
-
-
 def main():
     common.require_non_root()
     parser = argparse.ArgumentParser()
@@ -65,12 +49,12 @@ def main():
     for script in selected:
         native = run_script(script)
         under = run_script(script, prefix=(calco,))
-        problems = differences(native, under)
+        problems = common.differences(native, under)
         if native.returncode != 0:
             problems.insert(0, f"native lua ended with {native.describe()}")
         if problems:
-            save(OUT / f"{script.stem}.native.out", native)
-            save(OUT / f"{script.stem}.calco.out", under)
+            common.save(OUT / f"{script.stem}.native.out", native)
+            common.save(OUT / f"{script.stem}.calco.out", under)
             failed.append(script.name)
             print(f"{script.name}: {'; '.join(problems)}")
         else:

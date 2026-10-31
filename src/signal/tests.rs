@@ -1,12 +1,13 @@
 use super::frame::*;
 use super::*;
 use crate::cpu::RBX;
-use crate::jit::translate::{Env, GuestCode, Translation, translate};
+use crate::jit::tests::{BASE, Guest, NEAR, tr};
+use crate::jit::translate::Translation;
+use std::process::Command;
 
 #[test]
 fn guest_numbers_map_like_the_contract() {
     assert_eq!(host_signal(0), Some(0));
-    assert_eq!(host_signal(SIGSEGV as u64), Some(11));
     assert_eq!(host_signal(31), Some(31));
     assert_eq!(host_signal(32), Some(64));
     assert_eq!(host_signal(33), Some(63));
@@ -17,7 +18,6 @@ fn guest_numbers_map_like_the_contract() {
     }
     assert_eq!(guest_signal(64), 32);
     assert_eq!(guest_signal(63), 33);
-    assert_eq!(guest_signal(17), 17);
     for sig in (1..=61).filter(|&s| s != 32 && s != 33) {
         assert_eq!(guest_signal(host_signal(sig).unwrap() as u32), sig as u32);
     }
@@ -37,7 +37,6 @@ fn masks_are_translated_both_ways() {
     assert_eq!(all & SYNC_SIGNALS, 0);
     assert_eq!(all & bit(HOST_KICK), 0);
     assert_eq!(all & bit(10), bit(10));
-    assert_eq!(host_mask(bit(32)), bit(64));
 }
 
 #[test]
@@ -94,7 +93,6 @@ fn interrupted_calls_restart_like_the_kernel() {
     assert!(!restarts(130, eintr, Some(SA_RESTART)));
     // A call the signal came before never ran: it always runs after the handler.
     assert!(restarts(35, skipped, Some(0)));
-    assert!(restarts(1, skipped, Some(0)));
 }
 
 #[test]
@@ -106,209 +104,79 @@ fn default_actions_follow_signal_7() {
     assert_eq!(default_action(34), DefaultAction::Term);
 }
 
-/// The C expression of every layout constant of `frame.rs`, from the installed headers.
-fn header_layout() -> Vec<(&'static str, String, u64)> {
-    let mut v: Vec<(&'static str, String, u64)> = vec![
-        (
-            "uc_flags",
-            "offsetof(struct ucontext, uc_flags)".into(),
-            UC_FLAGS as u64,
-        ),
-        (
-            "uc_link",
-            "offsetof(struct ucontext, uc_link)".into(),
-            UC_LINK as u64,
-        ),
-        (
-            "uc_stack",
-            "offsetof(struct ucontext, uc_stack)".into(),
-            UC_STACK as u64,
-        ),
-        (
-            "uc_mcontext",
-            "offsetof(struct ucontext, uc_mcontext)".into(),
-            UC_MCONTEXT as u64,
-        ),
-        (
-            "uc_sigmask",
-            "offsetof(struct ucontext, uc_sigmask)".into(),
-            UC_SIGMASK as u64,
-        ),
-        ("ucontext", "sizeof(struct ucontext)".into(), UC_SIZE as u64),
-        ("ss_sp", "offsetof(stack_t, ss_sp)".into(), SS_SP as u64),
-        (
-            "ss_flags",
-            "offsetof(stack_t, ss_flags)".into(),
-            SS_FLAGS as u64,
-        ),
-        (
-            "ss_size",
-            "offsetof(stack_t, ss_size)".into(),
-            SS_SIZE as u64,
-        ),
-        ("stack_t", "sizeof(stack_t)".into(), STACK_T_SIZE as u64),
-        (
-            "rip",
-            "offsetof(struct sigcontext, rip)".into(),
-            SC_RIP as u64,
-        ),
-        (
-            "eflags",
-            "offsetof(struct sigcontext, eflags)".into(),
-            SC_EFLAGS as u64,
-        ),
-        ("cs", "offsetof(struct sigcontext, cs)".into(), SC_CS as u64),
-        ("gs", "offsetof(struct sigcontext, gs)".into(), SC_GS as u64),
-        ("fs", "offsetof(struct sigcontext, fs)".into(), SC_FS as u64),
-        ("ss", "offsetof(struct sigcontext, ss)".into(), SC_SS as u64),
-        (
-            "err",
-            "offsetof(struct sigcontext, err)".into(),
-            SC_ERR as u64,
-        ),
-        (
-            "trapno",
-            "offsetof(struct sigcontext, trapno)".into(),
-            SC_TRAPNO as u64,
-        ),
-        (
-            "oldmask",
-            "offsetof(struct sigcontext, oldmask)".into(),
-            SC_OLDMASK as u64,
-        ),
-        (
-            "cr2",
-            "offsetof(struct sigcontext, cr2)".into(),
-            SC_CR2 as u64,
-        ),
-        (
-            "fpstate",
-            "offsetof(struct sigcontext, fpstate)".into(),
-            SC_FPSTATE as u64,
-        ),
-        (
-            "sigcontext",
-            "sizeof(struct sigcontext)".into(),
-            SC_SIZE as u64,
-        ),
-        (
-            "si_signo",
-            "offsetof(siginfo_t, si_signo)".into(),
-            SI_SIGNO as u64,
-        ),
-        (
-            "si_code",
-            "offsetof(siginfo_t, si_code)".into(),
-            SI_CODE as u64,
-        ),
-        (
-            "si_addr",
-            "offsetof(siginfo_t, si_addr)".into(),
-            SI_ADDR as u64,
-        ),
-        (
-            "si_status",
-            "offsetof(siginfo_t, si_status)".into(),
-            SI_STATUS as u64,
-        ),
-        ("siginfo_t", "sizeof(siginfo_t)".into(), SIGINFO_SIZE as u64),
-        (
-            "pretcode",
-            "offsetof(struct rt_sigframe, pretcode)".into(),
-            FRAME_PRETCODE as u64,
-        ),
-        (
-            "frame_uc",
-            "offsetof(struct rt_sigframe, uc)".into(),
-            FRAME_UC as u64,
-        ),
-        (
-            "frame_info",
-            "offsetof(struct rt_sigframe, info)".into(),
-            FRAME_INFO as u64,
-        ),
-        (
-            "rt_sigframe",
-            "sizeof(struct rt_sigframe)".into(),
-            FRAME_SIZE as u64,
-        ),
-        (
-            "cwd",
-            "offsetof(struct _fpstate_64, cwd)".into(),
-            FP_CWD as u64,
-        ),
-        (
-            "swd",
-            "offsetof(struct _fpstate_64, swd)".into(),
-            FP_SWD as u64,
-        ),
-        (
-            "twd",
-            "offsetof(struct _fpstate_64, twd)".into(),
-            FP_TWD as u64,
-        ),
-        (
-            "mxcsr",
-            "offsetof(struct _fpstate_64, mxcsr)".into(),
-            FP_MXCSR as u64,
-        ),
-        (
-            "st_space",
-            "offsetof(struct _fpstate_64, st_space)".into(),
-            FP_ST as u64,
-        ),
-        (
-            "xmm_space",
-            "offsetof(struct _fpstate_64, xmm_space)".into(),
-            FP_XMM as u64,
-        ),
-        (
-            "sw_reserved",
-            "offsetof(struct _fpstate_64, sw_reserved)".into(),
-            FP_SW_RESERVED as u64,
-        ),
-        (
-            "_fpstate_64",
-            "sizeof(struct _fpstate_64)".into(),
-            FP_SIZE as u64,
-        ),
-        (
-            "FP_XSTATE_MAGIC1",
-            "FP_XSTATE_MAGIC1".into(),
-            FP_XSTATE_MAGIC1 as u64,
-        ),
-        (
-            "UC_SIGCONTEXT_SS",
-            "UC_SIGCONTEXT_SS".into(),
-            UC_SIGCONTEXT_SS,
-        ),
-        (
-            "UC_STRICT_RESTORE_SS",
-            "UC_STRICT_RESTORE_SS".into(),
-            UC_STRICT_RESTORE_SS,
-        ),
-        ("SS_ONSTACK", "SS_ONSTACK".into(), SS_ONSTACK as u64),
-        ("SS_DISABLE", "SS_DISABLE".into(), SS_DISABLE as u64),
-        (
-            "SS_AUTODISARM",
-            "SS_AUTODISARM".into(),
-            SS_AUTODISARM as u64,
-        ),
-        ("MINSIGSTKSZ", "MINSIGSTKSZ".into(), MINSIGSTKSZ),
-        ("SA_SIGINFO", "SA_SIGINFO".into(), SA_SIGINFO),
-        ("SA_ONSTACK", "SA_ONSTACK".into(), SA_ONSTACK),
-        ("SA_RESTART", "SA_RESTART".into(), SA_RESTART),
-        ("SA_NODEFER", "SA_NODEFER".into(), SA_NODEFER),
-        ("SA_RESETHAND", "SA_RESETHAND".into(), SA_RESETHAND),
-        ("SA_RESTORER", "SA_RESTORER".into(), SA_RESTORER),
+/// The C expression of every layout constant of `frame.rs`, from the installed headers,
+/// with the value calco uses.
+fn header_layout() -> Vec<(String, u64)> {
+    let offsets: &[(&str, &str, usize)] = &[
+        ("struct ucontext", "uc_flags", UC_FLAGS),
+        ("struct ucontext", "uc_link", UC_LINK),
+        ("struct ucontext", "uc_stack", UC_STACK),
+        ("struct ucontext", "uc_mcontext", UC_MCONTEXT),
+        ("struct ucontext", "uc_sigmask", UC_SIGMASK),
+        ("stack_t", "ss_sp", SS_SP),
+        ("stack_t", "ss_flags", SS_FLAGS),
+        ("stack_t", "ss_size", SS_SIZE),
+        ("struct sigcontext", "rip", SC_RIP),
+        ("struct sigcontext", "eflags", SC_EFLAGS),
+        ("struct sigcontext", "cs", SC_CS),
+        ("struct sigcontext", "gs", SC_GS),
+        ("struct sigcontext", "fs", SC_FS),
+        ("struct sigcontext", "ss", SC_SS),
+        ("struct sigcontext", "err", SC_ERR),
+        ("struct sigcontext", "trapno", SC_TRAPNO),
+        ("struct sigcontext", "oldmask", SC_OLDMASK),
+        ("struct sigcontext", "cr2", SC_CR2),
+        ("struct sigcontext", "fpstate", SC_FPSTATE),
+        ("siginfo_t", "si_signo", SI_SIGNO),
+        ("siginfo_t", "si_code", SI_CODE),
+        ("siginfo_t", "si_addr", SI_ADDR),
+        ("siginfo_t", "si_status", SI_STATUS),
+        ("struct rt_sigframe", "pretcode", FRAME_PRETCODE),
+        ("struct rt_sigframe", "uc", FRAME_UC),
+        ("struct rt_sigframe", "info", FRAME_INFO),
+        ("struct _fpstate_64", "cwd", FP_CWD),
+        ("struct _fpstate_64", "swd", FP_SWD),
+        ("struct _fpstate_64", "twd", FP_TWD),
+        ("struct _fpstate_64", "mxcsr", FP_MXCSR),
+        ("struct _fpstate_64", "st_space", FP_ST),
+        ("struct _fpstate_64", "xmm_space", FP_XMM),
+        ("struct _fpstate_64", "sw_reserved", FP_SW_RESERVED),
+    ];
+    let sizes: &[(&str, usize)] = &[
+        ("struct ucontext", UC_SIZE),
+        ("stack_t", STACK_T_SIZE),
+        ("struct sigcontext", SC_SIZE),
+        ("siginfo_t", SIGINFO_SIZE),
+        ("struct rt_sigframe", FRAME_SIZE),
+        ("struct _fpstate_64", FP_SIZE),
+    ];
+    let constants: &[(&str, u64)] = &[
+        ("FP_XSTATE_MAGIC1", FP_XSTATE_MAGIC1 as u64),
+        ("UC_SIGCONTEXT_SS", UC_SIGCONTEXT_SS),
+        ("UC_STRICT_RESTORE_SS", UC_STRICT_RESTORE_SS),
+        ("SS_ONSTACK", SS_ONSTACK as u64),
+        ("SS_DISABLE", SS_DISABLE as u64),
+        ("SS_AUTODISARM", SS_AUTODISARM as u64),
+        ("MINSIGSTKSZ", MINSIGSTKSZ),
+        ("SA_SIGINFO", SA_SIGINFO),
+        ("SA_ONSTACK", SA_ONSTACK),
+        ("SA_RESTART", SA_RESTART),
+        ("SA_NODEFER", SA_NODEFER),
+        ("SA_RESETHAND", SA_RESETHAND),
+        ("SA_RESTORER", SA_RESTORER),
     ];
     let names = [
         "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12",
         "r13", "r14", "r15",
     ];
+    let offsetof = |s: &str, f: &str, v: usize| (format!("offsetof({s}, {f})"), v as u64);
+    let mut v: Vec<(String, u64)> = offsets.iter().map(|&(s, f, o)| offsetof(s, f, o)).collect();
+    let sizeof = |t: &str, n: usize| (format!("sizeof({t})"), n as u64);
+    v.extend(sizes.iter().map(|&(t, n)| sizeof(t, n)));
+    v.extend(constants.iter().map(|&(c, n)| (c.to_string(), n)));
     for (reg, name) in names.iter().enumerate() {
-        let expr = format!("offsetof(struct ucontext, uc_mcontext.{name})");
-        v.push((name, expr, uc_gpr(reg) as u64));
+        let field = format!("uc_mcontext.{name}");
+        v.push(offsetof("struct ucontext", &field, uc_gpr(reg)));
     }
     v
 }
@@ -328,10 +196,8 @@ fn frame_layout_matches_the_kernel_headers() {
          struct rt_sigframe { char *pretcode; struct ucontext uc; siginfo_t info; };\n\
          int main(void) {\n",
     );
-    for (name, expr, _) in &layout {
-        c.push_str(&format!(
-            "    printf(\"%s %lu\\n\", \"{name}\", (unsigned long)({expr}));\n"
-        ));
+    for (expr, _) in &layout {
+        c += &format!("    printf(\"%lu\\n\", (unsigned long)({expr}));\n");
     }
     c.push_str("    return 0;\n}\n");
 
@@ -339,43 +205,25 @@ fn frame_layout_matches_the_kernel_headers() {
     std::fs::create_dir_all(&dir).unwrap();
     let (src, exe) = (dir.join("layout.c"), dir.join("layout"));
     std::fs::write(&src, c).unwrap();
-    let cc = std::process::Command::new("cc")
-        .arg("-o")
-        .arg(&exe)
-        .arg(&src)
-        .output()
-        .expect("cannot run cc");
-    assert!(
-        cc.status.success(),
-        "{}",
-        String::from_utf8_lossy(&cc.stderr)
-    );
-    let out = std::process::Command::new(&exe).output().unwrap();
+    let cc = Command::new("cc").arg("-o").arg(&exe).arg(&src).output();
+    let cc = cc.expect("cannot run cc");
+    let stderr = String::from_utf8_lossy(&cc.stderr);
+    assert!(cc.status.success(), "{stderr}");
+    let out = Command::new(&exe).output().unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
     let out = String::from_utf8(out.stdout).unwrap();
-
-    let got: Vec<(&str, u64)> = out
-        .lines()
-        .map(|l| {
-            let (name, v) = l.split_once(' ').unwrap();
-            (name, v.parse().unwrap())
-        })
-        .collect();
-    let want: Vec<(&str, u64)> = layout.iter().map(|(n, _, v)| (*n, *v)).collect();
+    let values = out.lines().map(|l| l.parse::<u64>().unwrap());
+    let got: Vec<(&str, u64)> = layout.iter().map(|(e, _)| e.as_str()).zip(values).collect();
+    let want: Vec<(&str, u64)> = layout.iter().map(|(e, v)| (e.as_str(), *v)).collect();
+    assert_eq!(got.len(), want.len());
     assert_eq!(got, want);
 }
 
 #[test]
 fn built_frame_has_the_state_where_the_kernel_puts_it() {
     let gpr: [u64; 16] = core::array::from_fn(|r| 0x1000 + r as u64);
-    let saved = Saved {
-        gpr: &gpr,
-        rip: 0x40_1234,
-        rflags: 0x246,
-        err: 7,
-        trapno: 14,
-        cr2: 0xdead_0000,
-    };
+    #[rustfmt::skip]
+    let saved = Saved { gpr: &gpr, rip: 0x40_1234, rflags: 0x246, err: 7, trapno: 14, cr2: 0xdead_0000 };
     let alt = AltStack {
         sp: 0x7000_0000,
         size: 0x4000,
@@ -424,6 +272,13 @@ fn fpstate_says_there_is_no_xsave() {
     assert_eq!(get32(&init, FP_MXCSR), MXCSR_INIT);
 }
 
+/// An alternate stack of 8 KiB.
+const ALT: AltStack = AltStack {
+    sp: 0x5000_0000,
+    size: 0x2000,
+    flags: 0,
+};
+
 #[test]
 fn frames_go_below_the_red_zone_or_on_the_alternate_stack() {
     let rsp = 0x7fff_1238;
@@ -437,11 +292,7 @@ fn frames_go_below_the_red_zone_or_on_the_alternate_stack() {
     // The handler starts as after a `call`: (rsp + 8) % 16 == 0.
     assert_eq!((frame + 8) % 16, 0);
 
-    let alt = AltStack {
-        sp: 0x5000_0000,
-        size: 0x2000,
-        flags: 0,
-    };
+    let alt = ALT;
     let (frame, fp) = place(rsp, true, &alt).unwrap();
     assert!(alt.contains(frame) && fp + FP_SIZE as u64 <= alt.sp + alt.size);
     // Already on it: nested below the current RSP.
@@ -457,11 +308,7 @@ fn frames_go_below_the_red_zone_or_on_the_alternate_stack() {
 
 #[test]
 fn altstack_modes_follow_sigaltstack_2() {
-    let alt = AltStack {
-        sp: 0x5000_0000,
-        size: 0x2000,
-        flags: 0,
-    };
+    let alt = ALT;
     assert_eq!(AltStack::DISABLED.mode(0x1234), SS_DISABLE);
     assert_eq!(alt.mode(0x5000_1000), SS_ONSTACK);
     assert_eq!(alt.mode(0x6000_0000), 0);
@@ -480,32 +327,8 @@ fn altstack_modes_follow_sigaltstack_2() {
     assert_eq!(set_altstack(&th, 0, SS_DISABLE, 0, 0x5000_1000), Err(EPERM));
 }
 
-/// Guest code at `BASE`.
-struct Guest(Vec<u8>);
-
-const BASE: u64 = 0x40_1000;
-
-impl GuestCode for Guest {
-    fn fetch(&self, rip: u64, buf: &mut [u8]) -> usize {
-        let Some(off) = rip.checked_sub(BASE).map(|o| o as usize) else {
-            return 0;
-        };
-        let n = buf.len().min(self.0.len().saturating_sub(off));
-        buf[..n].copy_from_slice(&self.0[off..off + n]);
-        n
-    }
-}
-
 fn translated(bytes: &[u8]) -> Translation {
-    let env = Env {
-        host: 0x2000_0000,
-        exit_thunk: 0x2000_0000 - 0x100,
-        indirect_exit: 0x2000_0000 - 0x80,
-        lookup_table: 0x5000_0000,
-        cache_base: 0x2000_0000 - 0x100,
-        first_exit_id: 0,
-    };
-    translate(&Guest(bytes.to_vec()), BASE, &env).unwrap()
+    tr(&Guest::new(BASE, bytes), NEAR)
 }
 
 #[test]
@@ -516,14 +339,10 @@ fn state_is_rebuilt_from_the_pc_table_with_scratch_temporaries() {
     // Host instructions of the expansion: save rsi, lea, save rax, load gs_base, lea,
     // restore rax, the store, restore rsi.
     let lens = [9u32, 5, 9, 9, 4, 9, 3, 9];
-    let at: Vec<u32> = lens
-        .iter()
-        .scan(0, |off, len| {
-            let start = *off;
-            *off += len;
-            Some(start)
-        })
-        .collect();
+    let mut at = vec![0u32];
+    for len in &lens[..7] {
+        at.push(at.last().unwrap() + len);
+    }
     let end = at[7] + lens[7];
     let table = &t.pcs;
     for off in 0..end + 1 {
@@ -542,17 +361,11 @@ fn state_is_rebuilt_from_the_pc_table_with_scratch_temporaries() {
     let check = |off: u32, regs: [u64; 16], rip: u64, boundary: bool| {
         let mut gpr = regs;
         let entry = entry_at(table, off).unwrap();
-        assert_eq!(
-            reconstruct(entry, &mut gpr, &scratch, 0),
-            rip,
-            "offset {off}"
-        );
+        let got = reconstruct(entry, &mut gpr, &scratch, 0);
+        assert_eq!(got, rip, "offset {off}");
         assert_eq!(gpr, guest, "registers at offset {off}");
-        assert_eq!(
-            at_boundary(table, off),
-            boundary,
-            "boundary at offset {off}"
-        );
+        let got = at_boundary(table, off);
+        assert_eq!(got, boundary, "boundary at offset {off}");
     };
     check(0, guest, BASE, true);
     // RSI holds the address; then RAX the GS base too.

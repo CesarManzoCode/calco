@@ -25,11 +25,8 @@ def parse_maps(text):
     return regions
 
 
-def main():
-    common.require_non_root()
-    calco = common.build_calco()
-    guest = common.compile_guest("pause")
-
+def paused_maps(calco, guest):
+    """calco's /proc/PID/maps while the pause guest waits on stdin."""
     proc = subprocess.Popen(
         [str(calco), str(guest)],
         stdin=subprocess.PIPE,
@@ -43,9 +40,8 @@ def main():
         if line != b"ready\n":
             proc.kill()
             proc.wait()
-            common.fail(f"pause printed {line!r} instead of ready ({proc.returncode})")
-        maps = f"/proc/{proc.pid}/maps"
-        with open(maps) as f:
+            common.fail(f"pause printed {line!r} instead of ready: {proc.stderr.read()!r}")
+        with open(f"/proc/{proc.pid}/maps") as f:
             regions = parse_maps(f.read())
         proc.stdin.write(b"\n")
         proc.stdin.close()
@@ -55,6 +51,23 @@ def main():
         watchdog.cancel()
     if code != 0:
         common.fail(f"pause under calco ended with {code}: {proc.stderr.read()!r}")
+    return regions
+
+
+def fail_if_executable(executable):
+    """Prints and fails on guest regions with execute permission, else says there are none."""
+    for start, end, perms, path in executable:
+        print(f"{start:x}-{end:x} {perms} {path}")
+    if executable:
+        common.fail(f"{len(executable)} guest regions are executable")
+    print("codigo-invitado-no-ejecutable")
+
+
+def main():
+    common.require_non_root()
+    calco = common.build_calco()
+    guest = common.compile_guest("pause")
+    regions = paused_maps(calco, guest)
 
     low = [r for r in regions if r[0] < GUEST_TOP]
     cache = [r for r in low if r[1] - r[0] == CODE_CACHE_SIZE and r[2] == "rwxp" and not r[3]]
@@ -62,13 +75,8 @@ def main():
         common.fail(f"expected one code cache mapping, found {len(cache)}")
     guest_regions = [r for r in low if r is not cache[0]]
     if not any(r[3] == str(guest) for r in guest_regions):
-        common.fail(f"no mapping of {guest} in {maps}")
-    executable = [r for r in guest_regions if "x" in r[2]]
-    for start, end, perms, path in executable:
-        print(f"{start:x}-{end:x} {perms} {path}")
-    if executable:
-        common.fail(f"{len(executable)} guest regions are executable")
-    print("codigo-invitado-no-ejecutable")
+        common.fail(f"no mapping of {guest} in /proc/PID/maps")
+    fail_if_executable([r for r in guest_regions if "x" in r[2]])
 
 
 if __name__ == "__main__":

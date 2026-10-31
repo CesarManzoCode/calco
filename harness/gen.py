@@ -142,11 +142,6 @@ def load_undefined(path=UNDEFINED_FLAGS):
     return rows, comments
 
 
-def transfer(row, undefined):
-    """Undefined flags after `row`. Flags it only may write keep their previous state."""
-    return (undefined - row.written) | row.undefined
-
-
 SHIFTS = {"shl", "shr", "sar"}
 SHIFT_DEFINED = frozenset({"CF", "PF", "ZF", "SF"})
 

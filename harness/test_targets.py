@@ -23,15 +23,11 @@ NONDET = {"ps", "top", "uptime", "id", "whoami", "who", "hostname", "ping", "wge
 
 class Cases(unittest.TestCase):
     def setUp(self):
+        # read_cases fails on a line without applet or with a stdin that is not in inputs/.
         self.cases = busybox_run.read_cases()
 
     def test_at_least_25_applets(self):
         self.assertGreaterEqual(len({c.applet for c in self.cases}), 25)
-
-    def test_every_stdin_exists(self):
-        for case in self.cases:
-            if case.stdin is not None:
-                self.assertTrue((busybox_run.INPUTS / case.stdin).is_file(), case.describe())
 
     def test_text_binary_and_compressed_inputs(self):
         used = {c.stdin for c in self.cases} | {a for c in self.cases for a in c.args}
@@ -44,13 +40,6 @@ class Cases(unittest.TestCase):
     def test_no_writer_or_nondeterministic_applet(self):
         for case in self.cases:
             self.assertNotIn(case.applet, WRITERS | NONDET, case.describe())
-
-    def test_every_column_has_a_tab_separated_applet(self):
-        for line in busybox_run.CASES.read_text().splitlines():
-            if line and not line.startswith("#"):
-                cols = line.split("\t")
-                self.assertGreaterEqual(len(cols), 2, line)
-                self.assertTrue(cols[1], line)
 
 
 class ParseCases(unittest.TestCase):
@@ -100,18 +89,11 @@ FAILED: not a result line
 
 
 class Suite(unittest.TestCase):
-    def test_results(self):
+    def test_results_and_pass_count_on_fixed_log(self):
         got = busybox_suite.results(LOG)
-        self.assertEqual(got, {
-            "cat-prints-a-file": (1, 0),
-            "cp-preserves-links": (0, 1),
-            "sort": (2, 0),
-            "sort -n": (1, 1),
-            "sed n command": (1, 0),
-        })
-
-    def test_pass_count_on_fixed_log(self):
-        self.assertEqual(sum(p for p, _ in busybox_suite.results(LOG).values()), 5)
+        self.assertEqual(got, {"cat-prints-a-file": (1, 0), "cp-preserves-links": (0, 1),
+                               "sort": (2, 0), "sort -n": (1, 1), "sed n command": (1, 0)})
+        self.assertEqual(sum(p for p, _ in got.values()), 5)
 
     def test_subset_is_intersection_of_two_native_runs(self):
         second = ("PASS: cat-prints-a-file\nPASS: cp-preserves-links\nPASS: sort\n"

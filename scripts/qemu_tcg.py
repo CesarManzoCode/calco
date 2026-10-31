@@ -106,12 +106,6 @@ def first_difference(a, b):
     return min(len(la), len(lb)) + 1
 
 
-def save(path, res):
-    status = f"signal {-res.returncode}" if res.returncode < 0 else f"exit {res.returncode}"
-    path.write_bytes(res.stdout + b"\n--- stderr ---\n" + res.stderr
-                     + f"\n--- {status} ---\n".encode())
-
-
 def build(name):
     sources = fetch.fetch("qemu-tests")
     OUT.mkdir(parents=True, exist_ok=True)
@@ -135,8 +129,8 @@ def main():
     binary = build(args.name)
     native = common.run([binary], timeout=TIMEOUT)
     under = common.run_calco(calco, binary, timeout=TIMEOUT)
-    save(OUT / f"{args.name}.native.out", native)
-    save(OUT / f"{args.name}.calco.out", under)
+    common.save(OUT / f"{args.name}.native.out", native)
+    common.save(OUT / f"{args.name}.calco.out", under)
 
     problems = compare(args.name, native, under)
     if problems:

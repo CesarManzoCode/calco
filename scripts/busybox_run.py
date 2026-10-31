@@ -73,22 +73,6 @@ def run_case(case, prefix=()):
                       timeout=TIMEOUT, cwd=INPUTS)
 
 
-def differences(native, calco):
-    problems = []
-    if native.returncode != calco.returncode:
-        problems.append(f"native ended with {native.describe()}, calco with {calco.describe()}")
-    if native.stdout != calco.stdout:
-        problems.append("stdout differs")
-    if native.stderr != calco.stderr:
-        problems.append("stderr differs")
-    return problems
-
-
-def save(path, res):
-    path.write_bytes(res.stdout + b"\n--- stderr ---\n" + res.stderr
-                     + f"\n--- {res.describe()} ---\n".encode())
-
-
 def main():
     common.require_non_root()
     parser = argparse.ArgumentParser()
@@ -106,11 +90,11 @@ def main():
     for case in cases:
         native = run_case(case)
         under = run_case(case, prefix=(calco,))
-        problems = differences(native, under)
+        problems = common.differences(native, under)
         if problems:
             failed += 1
-            save(OUT / f"{case.line}.native.out", native)
-            save(OUT / f"{case.line}.calco.out", under)
+            common.save(OUT / f"{case.line}.native.out", native)
+            common.save(OUT / f"{case.line}.calco.out", under)
             print(f"FAIL {case.describe()}: {'; '.join(problems)}")
     applets = len({c.applet for c in cases})
     print(f"busybox: {len(cases) - failed}/{len(cases)} casos iguales a nativo ({applets} applets)")

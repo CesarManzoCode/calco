@@ -3,9 +3,15 @@ mnemonic with undefined flags is in `undefined_flags.tsv` with a reference, and 
 exclusion is among the generator's templates or in the cases it emits."""
 
 import re
+import sys
 import unittest
+from pathlib import Path
 
 import gen
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+import mask_check  # noqa: E402
+import nondet_check  # noqa: E402
 
 SCOPE_HEADER = ["mnemonic", "ext", "forms", "flags_read", "flags_written", "flags_undefined", "ref"]
 EXTS = {"base", "x87", "mmx", "sse", "sse2", "sse3", "ssse3", "sse4.1", "sse4.2"}
@@ -59,22 +65,11 @@ class Scope(unittest.TestCase):
 
 
 class UndefinedFlags(unittest.TestCase):
-    def test_header_names_the_revision(self):
-        _, header = gen.load_undefined()
-        self.assertTrue(any("24594" in line and re.search(r"rev\w*\s*\d", line) for line in header))
+    def test_columns_revision_and_a_reference_for_every_undefined_mnemonic(self):
         self.assertEqual(data_lines(gen.UNDEFINED_FLAGS)[0].split("\t"),
                          ["mnemonic", "undefined", "ref"])
-
-    def test_every_undefined_mnemonic_has_a_reference(self):
-        table, _ = gen.load_undefined()
-        scope = gen.load_scope()
-        for mn, row in scope.items():
-            if row.undefined:
-                self.assertIn(mn, table, mn)
-                flags, ref = table[mn]
-                self.assertEqual(flags, row.undefined, mn)
-                self.assertTrue(ref, mn)
-        self.assertLessEqual(set(table), set(scope))
+        # The header names the APM revision; each row has a ref and the flags of the scope.
+        self.assertEqual(mask_check.problems(), [])
 
 
 class Exclusions(unittest.TestCase):
@@ -94,14 +89,9 @@ class Exclusions(unittest.TestCase):
     def test_not_emitted(self):
         exclusions = gen.load_exclusions()
         for seed in range(600):
-            for item in gen.generate(seed).items:
-                self.assertNotIn(item.mnemonic, exclusions, seed)
-                for line in item.lines:
-                    if line.split()[0].endswith(":"):
-                        line = line.split(":", 1)[1]
-                    words = [w for w in line.split() if w not in ("lock", "rep", "repe", "repne")]
-                    if words:
-                        self.assertNotIn(words[0], exclusions, (seed, line))
+            for item, word in nondet_check.emitted(gen.generate(seed)):
+                self.assertNotIn(item, exclusions, seed)
+                self.assertNotIn(word, exclusions, (seed, word))
 
 
 if __name__ == "__main__":

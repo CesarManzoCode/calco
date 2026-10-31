@@ -4,39 +4,12 @@
 //! and changes the page with `mprotect`, `munmap`, `madvise(MADV_DONTNEED)` and `mremap`
 //! between calls (k2-04).
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+mod common;
 
 #[test]
 fn smc_matches_native() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("smc");
-    std::fs::create_dir_all(&dir).unwrap();
-    let exe = dir.join("smc");
-    let status = Command::new("cc")
-        .args(["-O2", "-static", "-o"])
-        .arg(&exe)
-        .arg(root.join("guests/smc.c"))
-        .status()
-        .expect("cannot run cc");
-    assert!(status.success(), "cc failed: {status}");
-
-    let native = Command::new(&exe).output().expect("cannot run the guest");
+    let exe = common::cc("smc", "smc.c", "smc", &["-O2", "-static"]);
+    let native = common::native(&exe, &[], &[]);
     assert!(native.status.success(), "native: {}", native.status);
-    let calco = Command::new(env!("CARGO_BIN_EXE_calco"))
-        .arg(&exe)
-        .output()
-        .expect("cannot run calco");
-    assert_eq!(
-        String::from_utf8_lossy(&calco.stdout),
-        String::from_utf8_lossy(&native.stdout),
-        "calco stderr: {}",
-        String::from_utf8_lossy(&calco.stderr)
-    );
-    assert_eq!(
-        calco.status.code(),
-        native.status.code(),
-        "calco: {}",
-        calco.status
-    );
+    common::assert_same(&native, &common::calco(&exe, &[], &[]), "");
 }

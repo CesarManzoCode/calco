@@ -1,6 +1,7 @@
 """Shared helpers of the verification scripts (contract section 6): no root, building
 calco, compiling the guests and running programs with their output captured."""
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -70,6 +71,44 @@ def run(cmd, stdin=b"", env=None, timeout=120, cwd=None):
         cwd=cwd,
     )
     return Result(proc.stdout, proc.stderr, proc.returncode)
+
+
+def differences(native, calco):
+    """How the run under calco differs from the native one: end, stdout and stderr."""
+    problems = []
+    if native.returncode != calco.returncode:
+        problems.append(f"native ended with {native.describe()}, calco with {calco.describe()}")
+    if native.stdout != calco.stdout:
+        problems.append("stdout differs")
+    if native.stderr != calco.stderr:
+        problems.append("stderr differs")
+    return problems
+
+
+def same_as_native(native, res):
+    """Prints each of stdout, stderr and the end in which `res` differs from `native`;
+    True if it differs in none."""
+    ok = True
+    for what in ("stdout", "stderr"):
+        if getattr(res, what) != getattr(native, what):
+            print(f"{what}: {getattr(res, what)!r}, native {getattr(native, what)!r}")
+            ok = False
+    if res.returncode != native.returncode:
+        print(f"ended with {res.describe()}, native {native.describe()}")
+        ok = False
+    return ok
+
+
+def save(path, res):
+    """Writes the stdout, the stderr and how `res` ended to `path`."""
+    path.write_bytes(res.stdout + b"\n--- stderr ---\n" + res.stderr
+                     + f"\n--- {res.describe()} ---\n".encode())
+
+
+def sha256(path):
+    """Hex sha256 of the file `path`, or "missing" if there is none."""
+    path = Path(path)
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else "missing"
 
 
 def run_calco(calco, program, args=(), **kwargs):

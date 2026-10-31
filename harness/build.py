@@ -143,11 +143,6 @@ def build(cases, out_dir, name):
     return elf
 
 
-def load_masks(path):
-    """{case index: undefined flags} from a `.mask.json` file."""
-    return {int(k): frozenset(v) for k, v in json.loads(Path(path).read_text()).items()}
-
-
 def batch(first, count=BATCH):
     """Cases `first … first + count - 1`."""
     return [gen.generate(i) for i in range(first, first + count)]

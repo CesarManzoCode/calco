@@ -19,10 +19,7 @@ fn leaf1_drops_avx_xsave_and_keeps_v2() {
     assert_eq!(c, LEAF1_ECX);
     assert_eq!(c & (AVX | XSAVE | OSXSAVE | FMA | MOVBE | AES | F16C), 0);
     assert_eq!(d, LEAF1_EDX);
-}
-
-#[test]
-fn leaf1_only_keeps_what_the_host_has() {
+    // Only what the host has.
     let [_, _, c, d] = filter(1, [0, 0, 0, 0]);
     assert_eq!((c, d), (0, 0));
 }
@@ -46,20 +43,12 @@ fn extended_leaf1_keeps_lahf_syscall_nx_rdtscp_lm() {
 #[test]
 fn informative_leaves_pass() {
     let host = [0x10, 0x6874_7541, 0x444d_4163, 0x6974_6e65];
-    for leaf in [
-        0,
-        4,
-        0xb,
-        0x8000_0000,
-        0x8000_0002,
-        0x8000_0003,
-        0x8000_0004,
-        0x8000_0005,
-        0x8000_0006,
-        0x8000_0008,
-        0x8000_001d,
-        0x8000_001e,
-    ] {
+    #[rustfmt::skip]
+    let leaves = [
+        0, 4, 0xb, 0x8000_0000, 0x8000_0002, 0x8000_0003, 0x8000_0004, 0x8000_0005, 0x8000_0006,
+        0x8000_0008, 0x8000_001d, 0x8000_001e,
+    ];
+    for leaf in leaves {
         assert_eq!(filter(leaf, host), host, "leaf {leaf:#x}");
     }
 }

@@ -38,10 +38,8 @@ fn initial_state() {
     assert_eq!(cpu.rip, 0x40_1000);
     assert_eq!(cpu.gpr[RSP], 0x3fff_ffff_e000);
     assert_eq!(cpu.rflags, RFLAGS_INIT);
-    assert_eq!(
-        u16::from_le_bytes([cpu.fxsave.0[0], cpu.fxsave.0[1]]),
-        0x037f
-    );
+    let fcw = u16::from_le_bytes([cpu.fxsave.0[0], cpu.fxsave.0[1]]);
+    assert_eq!(fcw, 0x037f);
     let mxcsr: [u8; 4] = cpu.fxsave.0[24..28].try_into().unwrap();
     assert_eq!(u32::from_le_bytes(mxcsr), 0x1f80);
     assert!(cpu.fxsave.0[28..].iter().all(|&b| b == 0));

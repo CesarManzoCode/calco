@@ -3,15 +3,9 @@ use crate::cpu::{R8, RBX, RDI, RDX, RSI};
 use crate::signal::SIGCHLD;
 
 /// What glibc 2.44 passes to `clone` in `pthread_create` (`create_thread`).
-const PTHREAD: u64 = CLONE_VM
-    | CLONE_FS
-    | CLONE_FILES
-    | CLONE_SYSVSEM
-    | CLONE_SIGHAND
-    | CLONE_THREAD
-    | CLONE_SETTLS
-    | CLONE_PARENT_SETTID
-    | CLONE_CHILD_CLEARTID;
+#[rustfmt::skip]
+const PTHREAD: u64 = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SYSVSEM | CLONE_SIGHAND
+    | CLONE_THREAD | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID;
 const EXIT_SIGNAL: u64 = SIGCHLD as u64;
 
 #[test]
@@ -105,10 +99,8 @@ fn child_cpu_keeps_the_parent_stack_and_tls_unless_asked() {
     let c = child_cpu(&p, flags, 0, 0x2000_0001_0000, 0x2000_0002_0000);
     assert_eq!(c.gpr[RSP], p.gpr[RSP], "stack 0 keeps the parent's");
     assert_eq!(c.fs_base, p.fs_base, "without CLONE_SETTLS");
-    assert_eq!(
-        c.clear_child_tid, 0,
-        "without CLONE_CHILD_CLEARTID nothing is inherited"
-    );
+    let ctid = c.clear_child_tid;
+    assert_eq!(ctid, 0, "without CLONE_CHILD_CLEARTID nothing is inherited");
 }
 
 #[test]

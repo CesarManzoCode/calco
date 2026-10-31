@@ -15,7 +15,6 @@ build/tcc/tcc1, which is then renamed, so the output name cannot make the two di
 """
 
 import argparse
-import hashlib
 import signal
 from pathlib import Path
 
@@ -47,15 +46,6 @@ def selfcompile(dest, prefix=()):
     return res
 
 
-def sha256(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest() if path.exists() else "missing"
-
-
-def save(path, res):
-    path.write_bytes(res.stdout + b"\n--- stderr ---\n" + res.stderr
-                     + f"\n--- {res.describe()} ---\n".encode())
-
-
 def main():
     common.require_non_root()
     parser = argparse.ArgumentParser()
@@ -69,13 +59,13 @@ def main():
 
     native_bin, calco_bin = OUT / "tcc1.native", OUT / "tcc1.calco"
     native = selfcompile(native_bin)
-    save(OUT / "native.out", native)
+    common.save(OUT / "native.out", native)
     if native.returncode != 0 or not native_bin.exists():
         common.fail(f"native tcc0 ended with {native.describe()}; see {OUT / 'native.out'}")
     under = selfcompile(calco_bin, prefix=(calco,))
-    save(OUT / "calco.out", under)
+    common.save(OUT / "calco.out", under)
 
-    native_hash, calco_hash = sha256(native_bin), sha256(calco_bin)
+    native_hash, calco_hash = common.sha256(native_bin), common.sha256(calco_bin)
     problems = []
     if under.returncode != 0:
         problems.append(f"tcc0 under calco ended with {under.describe()}")

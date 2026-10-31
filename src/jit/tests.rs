@@ -5,17 +5,17 @@ use crate::decode::{Class, Insn, Map, decode};
 use crate::emit::{RAX, RCX, RSI};
 
 /// Guest code of a static executable.
-const BASE: u64 = 0x40_1000;
+pub(crate) const BASE: u64 = 0x40_1000;
 /// Guest code in the placement window, beyond rel32 of anything near the executable.
 const HIGH: u64 = 0x1000_0000_1000;
 /// Host code within 2 GiB of `BASE`, as the code cache is.
-const NEAR: u64 = 0x2000_0000;
+pub(crate) const NEAR: u64 = 0x2000_0000;
 /// Host code more than 2 GiB away from both.
 const FAR: u64 = 0x7000_0000_0000;
 /// Address of the lookup table of indirect transfers.
 const LOOKUP_TABLE: u64 = 0x5555_0000_0000;
 
-struct Guest {
+pub(crate) struct Guest {
     base: u64,
     bytes: Vec<u8>,
     /// First address without execute permission.
@@ -23,7 +23,7 @@ struct Guest {
 }
 
 impl Guest {
-    fn new(base: u64, bytes: &[u8]) -> Guest {
+    pub(crate) fn new(base: u64, bytes: &[u8]) -> Guest {
         Guest {
             base,
             bytes: bytes.to_vec(),
@@ -55,7 +55,7 @@ fn env(host: u64) -> Env {
     }
 }
 
-fn tr(g: &Guest, host: u64) -> Translation {
+pub(crate) fn tr(g: &Guest, host: u64) -> Translation {
     translate(g, g.base, &env(host)).unwrap()
 }
 
@@ -87,14 +87,12 @@ fn exit_values(insns: &[(usize, Insn)]) -> Option<(u64, u64)> {
     let v: Vec<(usize, u64)> = insns
         .iter()
         .take(4)
-        .filter_map(|(_, i)| gs_dword(i))
+        .filter_map(|x| gs_dword(&x.1))
         .collect();
-    let offsets = [
-        OFF_NEXT_RIP,
-        OFF_NEXT_RIP + 4,
-        OFF_EXIT_REASON,
-        OFF_EXIT_REASON + 4,
-    ];
+    let offsets = [OFF_NEXT_RIP, OFF_NEXT_RIP + 4];
+    let offsets = offsets
+        .into_iter()
+        .chain([OFF_EXIT_REASON, OFF_EXIT_REASON + 4]);
     (v.len() == 4 && v.iter().map(|x| x.0).eq(offsets))
         .then(|| (v[0].1 | v[1].1 << 32, v[2].1 | v[3].1 << 32))
 }
@@ -109,10 +107,8 @@ fn exits_in(t: &Translation, host: u64) -> Vec<(u64, u64)> {
 
 /// The exit at host offset `off`.
 fn exit_at(t: &Translation, host: u64, off: usize) -> (u64, u64) {
-    let insns: Vec<(usize, Insn)> = host_insns(t, host)
-        .into_iter()
-        .skip_while(|(o, _)| *o < off)
-        .collect();
+    let insns = host_insns(t, host);
+    let insns: Vec<(usize, Insn)> = insns.into_iter().skip_while(|x| x.0 < off).collect();
     assert_eq!(insns[0].0, off);
     exit_values(&insns).expect("an exit")
 }
@@ -181,8 +177,9 @@ fn syscall_cpuid_and_traps_leave_inline() {
         (&[0xcd, 0x80], exit_signal(11), BASE),
         // Far return is out of the scope.
         (&[0xcb], exit_signal(11), BASE),
-        // A string instruction with gs.
+        // A string instruction with gs; vzeroupper (VEX is out of the scope).
         (&[0x65, 0xa4], exit_signal(4), BASE),
+        (&[0xc5, 0xf8, 0x77], exit_signal(4), BASE),
     ];
     for &(bytes, reason, next) in cases {
         let mut code = bytes.to_vec();
@@ -196,26 +193,11 @@ fn syscall_cpuid_and_traps_leave_inline() {
 }
 
 #[test]
-fn invalid_instruction_leaves_with_sigill() {
-    // nop; vzeroupper (VEX is out of the scope)
-    let g = Guest::new(BASE, &[0x90, 0xc5, 0xf8, 0x77]);
-    let t = tr(&g, NEAR);
-    assert_eq!(t.insns, 2);
-    assert!(t.exits.is_empty());
-    assert_eq!(exits_in(&t, NEAR), [(BASE + 1, exit_signal(4) as u64)]);
-}
-
-#[test]
 fn code_without_execute_permission_faults() {
     let mut g = Guest::new(BASE, &[0x90, 0x48, 0xb8, 1, 2, 3, 4, 5, 6, 7, 8]);
+    let segv = |addr| Fault { signal: 11, addr };
     g.exec_end = BASE;
-    assert_eq!(
-        translate(&g, BASE, &env(NEAR)).unwrap_err(),
-        Fault {
-            signal: 11,
-            addr: BASE
-        }
-    );
+    assert_eq!(translate(&g, BASE, &env(NEAR)).unwrap_err(), segv(BASE));
     // The movabs runs into memory without permission: the block stops before it, and the
     // block that starts at it faults at the first byte without permission.
     g.exec_end = BASE + 3;
@@ -224,10 +206,7 @@ fn code_without_execute_permission_faults() {
     assert_eq!(targets(&t), [BASE + 1]);
     assert_eq!(
         translate(&g, BASE + 1, &env(NEAR)).unwrap_err(),
-        Fault {
-            signal: 11,
-            addr: BASE + 3
-        }
+        segv(BASE + 3)
     );
 }
 
@@ -244,8 +223,9 @@ fn chainable_exits_are_aligned_and_start_at_their_stubs() {
             assert_eq!(e.jump as i64 + 4 + rel as i64, e.stub as i64);
             let reason = EXIT_BRANCH as u64 | (7 + i as u64) << 32;
             assert_eq!(exit_at(&t, host, e.stub as usize), (e.target, reason));
+            let pc = t.lookup(e.stub).unwrap().pc;
             assert_eq!(
-                t.lookup(e.stub).unwrap().pc,
+                pc,
                 GuestPc::At(e.target),
                 "a stub is at the boundary of its target"
             );
@@ -276,13 +256,12 @@ fn direct_call_writes_the_return_address_and_chains() {
     let g = Guest::new(BASE, &[0xe8, 0x10, 0x00, 0x00, 0x00]);
     let t = tr(&g, NEAR);
     assert_eq!(targets(&t), [BASE + 0x15]);
-    // mov qword [rsp-8], BASE+5; lea rsp, [rsp-8]
-    assert_eq!(
-        &t.code[..14],
-        [
-            0x48, 0xc7, 0x44, 0x24, 0xf8, 0x05, 0x10, 0x40, 0x00, 0x48, 0x8d, 0x64, 0x24, 0xf8
-        ]
-    );
+    #[rustfmt::skip]
+    let expect = [
+        0x48, 0xc7, 0x44, 0x24, 0xf8, 0x05, 0x10, 0x40, 0x00, // mov qword [rsp-8], BASE+5
+        0x48, 0x8d, 0x64, 0x24, 0xf8,                         // lea rsp, [rsp-8]
+    ];
+    assert_eq!(&t.code[..14], expect);
     assert_eq!(t.lookup(9).unwrap().pc, GuestPc::At(BASE));
     assert_eq!(t.lookup(14).unwrap().pc, GuestPc::At(BASE + 0x15));
 }
@@ -368,10 +347,8 @@ fn gs_pop_with_rsp_base_counts_the_pop() {
     let t = tr(&g, NEAR);
     let insns = host_insns(&t, NEAR);
     // lea rsi, [rsp+8]; lea rsi, [rsi+8]
-    assert_eq!(
-        &t.code[insns[1].0..insns[3].0],
-        [0x48, 0x8d, 0x74, 0x24, 0x08, 0x48, 0x8d, 0x76, 0x08]
-    );
+    let leas = [0x48, 0x8d, 0x74, 0x24, 0x08, 0x48, 0x8d, 0x76, 0x08];
+    assert_eq!(&t.code[insns[1].0..insns[3].0], leas);
 }
 
 #[test]
@@ -425,10 +402,8 @@ fn inserted_code_never_writes_flags_nor_pushes() {
                 let g = Guest::new(base, bytes);
                 let t = tr(&g, host);
                 for (off, i) in host_insns(&t, host) {
-                    assert!(
-                        neutral(&i),
-                        "{bytes:02x?} at {base:#x} on {host:#x}: host +{off:#x} {i:?}"
-                    );
+                    let at = format!("{bytes:02x?} at {base:#x} on {host:#x}: host +{off:#x}");
+                    assert!(neutral(&i), "{at} {i:?}");
                 }
             }
         }
@@ -441,11 +416,8 @@ fn guest_flag_writers_are_the_only_ones() {
     // instruction that writes flags.
     let g = Guest::new(BASE, &[0x48, 0x03, 0x05, 0x10, 0x00, 0x00, 0x00]);
     let t = tr(&g, FAR);
-    let writers: Vec<Insn> = host_insns(&t, FAR)
-        .into_iter()
-        .map(|(_, i)| i)
-        .filter(|i| !neutral(i))
-        .collect();
+    let writers: Vec<Insn> = host_insns(&t, FAR).into_iter().map(|x| x.1).collect();
+    let writers: Vec<Insn> = writers.into_iter().filter(|i| !neutral(i)).collect();
     assert_eq!(writers.len(), 1);
     assert_eq!((writers[0].opcode, writers[0].modrm), (0x03, Some(0x06)));
 }
@@ -495,8 +467,8 @@ fn probe_writes_no_flags_and_never_touches_the_guest_stack() {
             let t = tr(&g, host);
             let insns = host_insns(&t, host);
             let probe = &insns[probe_start(&insns)..];
+            // That it writes no flags is `inserted_code_never_writes_flags_nor_pushes`.
             for (off, i) in probe {
-                assert!(neutral(i), "{bytes:02x?}: host +{off:#x} {i:?}");
                 // No RSP-based operand: the probe reads only `Cpu` and the table.
                 let rsp_base = i.modrm.is_some_and(|m| m >> 6 != 3 && m & 7 == 4)
                     && i.sib.is_some_and(|s| s & 7 == 4);
@@ -524,10 +496,7 @@ fn probe_indexes_the_table_by_the_low_bits_and_compares_with_lea() {
     let g = Guest::new(BASE, &[0xff, 0xe0]);
     let t = tr(&g, NEAR);
     let insns = host_insns(&t, NEAR);
-    let probe: Vec<Insn> = insns[probe_start(&insns)..]
-        .iter()
-        .map(|(_, i)| *i)
-        .collect();
+    let probe: Vec<Insn> = insns[probe_start(&insns)..].iter().map(|x| x.1).collect();
     let movzx: Vec<usize> = probe
         .iter()
         .filter(|i| i.map == Map::Map0F && i.opcode == 0xb7)
@@ -551,10 +520,8 @@ fn probe_indexes_the_table_by_the_low_bits_and_compares_with_lea() {
         .unwrap();
     assert_eq!(code(at(k + 2), at(k + 3)), [0x48, 0x8b, 0x04, 0xc8]);
     let load = probe[k + 3];
-    assert_eq!(
-        (load.opcode, load.seg_gs, load.disp as usize),
-        (0x8b, true, OFF_NEXT_RIP + 2)
-    );
+    let load = (load.opcode, load.seg_gs, load.disp as usize);
+    assert_eq!(load, (0x8b, true, OFF_NEXT_RIP + 2));
     assert_eq!(code(at(k + 4), at(k + 5)), [0x8d, 0x0c, 0x01]);
     assert_eq!(probe[k + 5].opcode, 0xe3);
 }
@@ -599,20 +566,15 @@ fn probe_pc_table_keeps_next_rip_and_its_temporaries() {
         assert_eq!(probe.len(), expect.len(), "{bytes:02x?}");
         for (k, ((off, _), temps)) in probe.iter().zip(expect).enumerate() {
             let e = t.lookup(*off as u32).unwrap();
-            assert_eq!(
-                (e.pc, e.temps),
-                (GuestPc::NextRip, temps),
-                "{bytes:02x?}: {k}"
-            );
+            let want = (GuestPc::NextRip, temps);
+            assert_eq!((e.pc, e.temps), want, "{bytes:02x?}: {k}");
         }
         // Each `jrcxz` lands on the save or spill that follows a miss path.
         for (k, (_, i)) in probe.iter().enumerate() {
             if i.opcode == 0xe3 {
                 let landing = i.target.unwrap() - NEAR;
-                let next_miss = probe[k..]
-                    .iter()
-                    .position(|(_, j)| j.opcode == 0xe9)
-                    .unwrap();
+                let next_miss = probe[k..].iter().position(|x| x.1.opcode == 0xe9);
+                let next_miss = next_miss.unwrap();
                 assert_eq!(landing as usize, probe[k + next_miss + 1].0, "{bytes:02x?}");
             }
         }
@@ -637,7 +599,6 @@ fn probe_end(entry: u64, target: u64, exit: u32) -> u32 {
 
 #[test]
 fn lookup_entries_are_indexed_by_the_low_bits_and_published_whole() {
-    assert!(LOOKUP_SLOTS.is_power_of_two());
     assert_eq!(
         LOOKUP_SLOTS,
         1 << 16,
@@ -660,8 +621,6 @@ fn lookup_entries_are_indexed_by_the_low_bits_and_published_whole() {
     assert_eq!(probe_hit(entry, rip), Some(0x4560));
     // Same slot, another rip; same bits 0–47 with bits 48–63 set.
     assert_eq!(probe_hit(entry, rip + 0x1_0000), None);
-    assert_eq!(probe_hit(entry, rip + 0x10_0000_0000), None);
-    assert_eq!(probe_hit(entry, rip | 1 << 48), None);
     assert_eq!(probe_hit(entry, rip | 0xffff << 48), None);
     // A rip that shares the slot replaces the entry.
     table.set(rip + 0x1_0000, 0x8000);

@@ -761,4 +761,4 @@ fn deferred_write(cpu: &mut Cpu) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

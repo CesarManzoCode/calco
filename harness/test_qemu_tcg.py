@@ -77,26 +77,18 @@ class CompileCommand(unittest.TestCase):
     def cmd(self, name):
         return qemu_tcg.compile_command(name, self.SRC, self.OUT)
 
-    def test_x86_64(self):
-        self.assertEqual(self.cmd("test-x86_64"),
-                         ["gcc", "-Wall", "-O0", "-g", "-fno-strict-aliasing",
-                          "/src/i386/test-i386.c", "-o", "/out/x", "-static", "-lm", "-lc"])
-
-    def test_sha512_sse(self):
-        self.assertEqual(self.cmd("sha512-sse"),
-                         ["gcc", "-msse4.1", "-O3", "/src/multiarch/sha512.c", "-o", "/out/x",
-                          "-static"])
-
-    def test_linux_test(self):
-        self.assertEqual(self.cmd("linux-test"),
-                         ["gcc", "-Wall", "-O0", "-g", "-fno-strict-aliasing",
-                          "/src/multiarch/linux/linux-test.c", "-o", "/out/x", "-static",
-                          "-lpthread"])
-
-    def test_testthread(self):
-        self.assertEqual(self.cmd("testthread"),
-                         ["gcc", "-Wall", "-O0", "-g", "-fno-strict-aliasing",
-                          "/src/multiarch/testthread.c", "-o", "/out/x", "-static", "-lpthread"])
+    def test_each_test(self):
+        flags = ["gcc", "-Wall", "-O0", "-g", "-fno-strict-aliasing"]
+        for name, want in (
+                ("test-x86_64", [*flags, "/src/i386/test-i386.c", "-o", "/out/x", "-static",
+                                 "-lm", "-lc"]),
+                ("sha512-sse", ["gcc", "-msse4.1", "-O3", "/src/multiarch/sha512.c", "-o",
+                                "/out/x", "-static"]),
+                ("linux-test", [*flags, "/src/multiarch/linux/linux-test.c", "-o", "/out/x",
+                                "-static", "-lpthread"]),
+                ("testthread", [*flags, "/src/multiarch/testthread.c", "-o", "/out/x",
+                                "-static", "-lpthread"])):
+            self.assertEqual(self.cmd(name), want, name)
 
     def test_never_werror(self):
         for name in qemu_tcg.TESTS:

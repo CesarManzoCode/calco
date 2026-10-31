@@ -6,11 +6,9 @@ ld-linux-x86-64.so.2 or of libc.so.6 in calco's /proc/PID/maps is executable. Pr
 
 import os
 import signal
-import subprocess
-import threading
 
 import common
-from noexec import parse_maps
+from noexec import fail_if_executable, paused_maps
 
 LIBRARIES = ("ld-linux-x86-64.so.2", "libc.so.6")
 
@@ -23,46 +21,9 @@ def compare_hello(calco):
     if native.returncode != 3:
         common.fail(f"native hello ended with {native.describe()}")
     res = common.run_calco(calco, guest, args, env=env)
-    ok = True
-    for what in ("stdout", "stderr"):
-        if getattr(res, what) != getattr(native, what):
-            print(f"{what}: {getattr(res, what)!r}, native {getattr(native, what)!r}")
-            ok = False
-    if res.returncode != native.returncode:
-        print(f"ended with {res.describe()}, native {native.describe()}")
-        ok = False
-    if not ok:
+    if not common.same_as_native(native, res):
         common.fail("dynamic hello under calco differs from native")
     print("dinamico-igual-a-nativo")
-
-
-def paused_maps(calco, guest):
-    """calco's /proc/PID/maps while the dynamic pause guest waits on stdin."""
-    proc = subprocess.Popen(
-        [str(calco), str(guest)],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    watchdog = threading.Timer(60, proc.kill)
-    watchdog.start()
-    try:
-        line = proc.stdout.readline()
-        if line != b"ready\n":
-            proc.kill()
-            proc.wait()
-            common.fail(f"pause printed {line!r} instead of ready: {proc.stderr.read()!r}")
-        with open(f"/proc/{proc.pid}/maps") as f:
-            regions = parse_maps(f.read())
-        proc.stdin.write(b"\n")
-        proc.stdin.close()
-        proc.stdout.read()
-        code = proc.wait()
-    finally:
-        watchdog.cancel()
-    if code != 0:
-        common.fail(f"pause under calco ended with {code}: {proc.stderr.read()!r}")
-    return regions
 
 
 def check_noexec(calco):
@@ -78,12 +39,7 @@ def check_noexec(calco):
     missing = [n for n in names.values() if n not in found]
     if missing:
         common.fail(f"not mapped by calco: {', '.join(missing)}")
-    executable = [r for rs in found.values() for r in rs if "x" in r[2]]
-    for start, end, perms, path in executable:
-        print(f"{start:x}-{end:x} {perms} {path}")
-    if executable:
-        common.fail(f"{len(executable)} guest regions are executable")
-    print("codigo-invitado-no-ejecutable")
+    fail_if_executable([r for rs in found.values() for r in rs if "x" in r[2]])
 
 
 def main():

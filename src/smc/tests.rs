@@ -31,10 +31,8 @@ fn spans_round_like_the_kernel() {
     assert_eq!(span(PAGE + 5, PAGE_SIZE), Some(PAGE..PAGE + 2 * PAGE_SIZE));
     assert_eq!(span(PAGE, 0), None);
     assert_eq!(span(USER_END, PAGE_SIZE), None);
-    assert_eq!(
-        span(USER_END - PAGE_SIZE, u64::MAX),
-        Some(USER_END - PAGE_SIZE..USER_END)
-    );
+    let last = USER_END - PAGE_SIZE;
+    assert_eq!(span(last, u64::MAX), Some(last..USER_END));
 }
 
 #[test]
@@ -48,10 +46,8 @@ fn writable_code_pages_are_protected_once() {
     assert!(p.protected);
     assert_eq!(p.blocks, vec![0, 1]);
     // Code the guest cannot write is noted but left alone.
-    assert!(
-        smc.track(2, PAGE + 0x2000, PAGE + 0x2010, all(RX))
-            .is_empty()
-    );
+    let rx = smc.track(2, PAGE + 0x2000, PAGE + 0x2010, all(RX));
+    assert!(rx.is_empty());
     assert!(!smc.page(PAGE + 0x2000).unwrap().protected);
 }
 
@@ -68,10 +64,8 @@ fn a_write_fault_drops_the_page_with_its_blocks() {
     assert_eq!(inv.restore, vec![(PAGE, PROT_READ | PROT_WRITE)]);
     // After invalidating, the page has no state: a new translation protects it again.
     assert_eq!(smc.page(PAGE), None);
-    assert_eq!(
-        smc.track(3, PAGE, PAGE + 4, all(RWX)),
-        vec![(PAGE, PROT_READ)]
-    );
+    let again = smc.track(3, PAGE, PAGE + 4, all(RWX));
+    assert_eq!(again, vec![(PAGE, PROT_READ)]);
     // The next page is still protected and keeps block 1 noted.
     let next = smc.page(PAGE + PAGE_SIZE).unwrap();
     assert!(next.protected);
@@ -84,10 +78,8 @@ fn faults_that_are_not_on_protected_code_belong_to_the_guest() {
     assert_eq!(smc.write_fault(PAGE), None);
     smc.track(0, PAGE, PAGE + 8, all(RX));
     assert_eq!(smc.write_fault(PAGE + 4), None);
-    assert!(
-        smc.page(PAGE).is_some(),
-        "a guest fault keeps the translations"
-    );
+    let kept = smc.page(PAGE).is_some();
+    assert!(kept, "a guest fault keeps the translations");
 }
 
 #[test]
@@ -112,16 +104,11 @@ fn mprotect_round_trip_protects_the_page_again() {
     assert!(smc.reprotect(PAGE..PAGE + PAGE_SIZE, RX).is_empty());
     let p = smc.page(PAGE).unwrap();
     assert_eq!((p.prot, p.protected), (RX, false));
-    assert_eq!(
-        smc.write_fault(PAGE),
-        None,
-        "a write to read-only code is the guest's"
-    );
+    let fault = smc.write_fault(PAGE);
+    assert_eq!(fault, None, "a write to read-only code is the guest's");
     // Back to RWX: the host gave write back, calco takes it away again.
-    assert_eq!(
-        smc.reprotect(PAGE..PAGE + PAGE_SIZE, RWX),
-        vec![(PAGE, PROT_READ)]
-    );
+    let again = smc.reprotect(PAGE..PAGE + PAGE_SIZE, RWX);
+    assert_eq!(again, vec![(PAGE, PROT_READ)]);
     let inv = smc.write_fault(PAGE).unwrap();
     assert_eq!(inv.blocks, vec![0]);
     assert_eq!(inv.restore, vec![(PAGE, PROT_READ | PROT_WRITE)]);

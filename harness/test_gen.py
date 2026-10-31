@@ -185,21 +185,11 @@ class Generator(unittest.TestCase):
         self.assertEqual(seen, set(gen.MASKMOV))
 
     def test_flags_read_only_when_defined(self):
-        exclusions = gen.load_exclusions()
+        """Every item reads only defined flags and the case mask is what is left undefined;
+        test_tables checks that no excluded mnemonic is emitted."""
         for seed in SEEDS:
             case = gen.generate(seed)
-            undefined, pending = frozenset(), {}
-            for item in case.items:
-                self.assertNotIn(item.mnemonic, exclusions)
-                row = ROWS[item.mnemonic]
-                undefined |= pending.pop(item.id, frozenset())
-                self.assertFalse(row.read & undefined, (seed, item.mnemonic, undefined))
-                undefined = gen.apply(row, item, undefined)
-                if item.target is not None:
-                    pending[item.target] = pending.get(item.target, frozenset()) | undefined
-            for later in pending.values():
-                undefined |= later
-            self.assertEqual(undefined, case.undefined, seed)
+            self.assertEqual(gen.sequence_flags(case.items, ROWS), (True, case.undefined), seed)
 
     def test_some_flags_end_undefined(self):
         self.assertTrue(any(gen.generate(seed).undefined for seed in SEEDS))

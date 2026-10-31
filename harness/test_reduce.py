@@ -30,15 +30,10 @@ class Ddmin(unittest.TestCase):
         self.assertEqual(reduce.ddmin(range(20), test), [3, 11, 17])
         self.assertTrue(calls)
 
-    def test_single_element(self):
+    def test_single_element_order_and_already_minimal(self):
         self.assertEqual(reduce.ddmin(range(37), lambda s: 29 in s), [29])
-
-    def test_keeps_order_and_is_one_minimal(self):
         need = {0, 5, 6, 30}
-        out = reduce.ddmin(list(range(31)), lambda s: need <= set(s))
-        self.assertEqual(out, sorted(need))
-
-    def test_already_minimal(self):
+        self.assertEqual(reduce.ddmin(list(range(31)), lambda s: need <= set(s)), sorted(need))
         self.assertEqual(reduce.ddmin([7], lambda s: 7 in s), [7])
 
 
@@ -78,11 +73,6 @@ class Immediates(unittest.TestCase):
 
 
 class Flags(unittest.TestCase):
-    def test_whole_case_mask(self):
-        for seed in range(300):
-            case = gen.generate(seed)
-            self.assertEqual(gen.sequence_flags(case.items, ROWS), (True, case.undefined), seed)
-
     def test_sublist_reading_undefined_flag_is_invalid(self):
         setb = gen.Item(1, "setb", ["setb al"])
         by_cl = gen.Item(0, "shl", ["shl eax, cl"])

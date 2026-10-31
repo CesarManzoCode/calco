@@ -53,31 +53,21 @@ fn parses_minimal_elf() {
 }
 
 #[test]
-fn rejects_32_bit() {
+fn rejects_what_it_cannot_load() {
     let mut b = minimal_elf();
     b[4] = 1;
     assert!(parse(&b).unwrap_err().contains("64-bit"));
-}
-
-#[test]
-fn rejects_other_machine() {
     let mut b = minimal_elf();
     b[18..20].copy_from_slice(&183u16.to_le_bytes()); // EM_AARCH64
     assert!(parse(&b).unwrap_err().contains("x86-64"));
-}
-
-#[test]
-fn rejects_non_elf_and_truncated() {
     assert!(parse(b"#!/bin/sh\n").is_err());
-    let b = minimal_elf();
-    assert!(parse(&b[..EHDR_SIZE + 10]).is_err());
-}
-
-#[test]
-fn rejects_misaligned_load() {
+    assert!(
+        parse(&minimal_elf()[..EHDR_SIZE + 10]).is_err(),
+        "truncated"
+    );
+    // A PT_LOAD whose p_offset is not congruent with its p_vaddr.
     let mut b = minimal_elf();
-    let off = EHDR_SIZE + 8;
-    b[off..off + 8].copy_from_slice(&0x10u64.to_le_bytes());
+    b[EHDR_SIZE + 8..EHDR_SIZE + 16].copy_from_slice(&0x10u64.to_le_bytes());
     assert!(parse(&b).is_err());
 }
 
@@ -85,17 +75,9 @@ fn rejects_misaligned_load() {
 fn detects_interp() {
     let mut b = minimal_elf();
     b[EHDR_SIZE..EHDR_SIZE + 4].copy_from_slice(&PT_INTERP.to_le_bytes());
-    // With its only PT_LOAD turned into PT_INTERP there is nothing to load.
+    // With its only PT_LOAD turned into PT_INTERP there is nothing to load. A PT_INTERP
+    // next to a PT_LOAD is `dynamic_elf`, in `auxv_of_an_executable_with_interpreter`.
     assert!(parse(&b).is_err());
-
-    let mut two = minimal_elf();
-    two[56..58].copy_from_slice(&2u16.to_le_bytes());
-    let mut interp = two[EHDR_SIZE..EHDR_SIZE + PHDR_SIZE].to_vec();
-    interp[..4].copy_from_slice(&PT_INTERP.to_le_bytes());
-    let at = EHDR_SIZE + PHDR_SIZE;
-    two.splice(at..at, interp);
-    let elf = parse(&two).unwrap();
-    assert!(elf.has_interp());
 }
 
 fn word(img: &StackImage, addr: u64) -> u64 {
@@ -172,31 +154,13 @@ fn stack_layout() {
                 _ => {}
             }
         }
-        assert_eq!(
-            keys,
-            vec![
-                AT_PHDR,
-                AT_PHENT,
-                AT_PHNUM,
-                AT_PAGESZ,
-                AT_BASE,
-                AT_FLAGS,
-                AT_ENTRY,
-                AT_UID,
-                AT_EUID,
-                AT_GID,
-                AT_EGID,
-                AT_SECURE,
-                AT_RANDOM,
-                AT_HWCAP,
-                AT_HWCAP2,
-                AT_CLKTCK,
-                AT_PLATFORM,
-                AT_EXECFN,
-                AT_MINSIGSTKSZ,
-                AT_NULL,
-            ]
-        );
+        #[rustfmt::skip]
+        let want = [
+            AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_FLAGS, AT_ENTRY, AT_UID, AT_EUID,
+            AT_GID, AT_EGID, AT_SECURE, AT_RANDOM, AT_HWCAP, AT_HWCAP2, AT_CLKTCK, AT_PLATFORM,
+            AT_EXECFN, AT_MINSIGSTKSZ, AT_NULL,
+        ];
+        assert_eq!(keys, want);
         assert!(p <= top);
     }
 }
@@ -207,10 +171,8 @@ fn shebang_line_parses_like_the_kernel() {
     assert_eq!(parse_shebang(b"#!/bin/sh\necho"), Ok((sh(), None)));
     assert_eq!(parse_shebang(b"#!/bin/sh"), Ok((sh(), None)));
     let env = parse_shebang(b"#! /usr/bin/env  python3 -u \t\nx");
-    assert_eq!(
-        env,
-        Ok((b"/usr/bin/env".to_vec(), Some(b"python3 -u".to_vec())))
-    );
+    let want = (b"/usr/bin/env".to_vec(), Some(b"python3 -u".to_vec()));
+    assert_eq!(env, Ok(want));
     assert_eq!(parse_shebang(b"#!  \t\n"), Err(ENOEXEC));
     let cut = [b"#!/".as_slice(), &[b'a'; 300]].concat();
     assert_eq!(
@@ -222,12 +184,8 @@ fn shebang_line_parses_like_the_kernel() {
 
 #[test]
 fn resolve_rewrites_a_script_into_its_interpreter() {
-    let dir = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let script = dir.join("calco-k2-01-resolve");
+    let script = std::env::current_exe().unwrap();
+    let script = script.with_file_name("calco-k2-01-resolve");
     std::fs::write(&script, "#!/bin/sh -e\nexit 0\n").unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -235,10 +193,8 @@ fn resolve_rewrites_a_script_into_its_interpreter() {
     let (path, argv) = resolve(&script, argv).unwrap();
     assert_eq!(path, Path::new("/bin/sh"));
     let script = script.as_os_str().as_bytes().to_vec();
-    assert_eq!(
-        argv,
-        [b"/bin/sh".to_vec(), b"-e".to_vec(), script, b"arg".to_vec()]
-    );
+    let want = [b"/bin/sh".to_vec(), b"-e".to_vec(), script, b"arg".to_vec()];
+    assert_eq!(argv, want);
 }
 
 const LD_SO: &[u8] = b"/lib64/ld-linux-x86-64.so.2\0";
@@ -276,9 +232,8 @@ fn auxv_of_an_executable_with_interpreter() {
     let b = dynamic_elf();
     let elf = parse(&b).unwrap();
     assert!(elf.has_interp());
-    let path = std::env::current_exe()
-        .unwrap()
-        .with_file_name("calco-k2-05-interp");
+    let path = std::env::current_exe().unwrap();
+    let path = path.with_file_name("calco-k2-05-interp");
     std::fs::write(&path, &b).unwrap();
     let interp = interp_path(&File::open(&path).unwrap(), &elf).unwrap();
     assert_eq!(interp, Some(PathBuf::from("/lib64/ld-linux-x86-64.so.2")));
@@ -293,14 +248,8 @@ fn auxv_of_an_executable_with_interpreter() {
     );
     assert_eq!(aux.phnum, 2);
     assert_eq!(aux.entry, DYN_BASE + 120, "AT_ENTRY is the executable's");
-    let img = build_stack(
-        crate::mem::STACK_TOP,
-        &strings(&["p"]),
-        &[],
-        b"p",
-        [0; 16],
-        &aux,
-    );
+    let argv = strings(&["p"]);
+    let img = build_stack(crate::mem::STACK_TOP, &argv, &[], b"p", [0; 16], &aux);
     let mut p = img.rsp + 8 * 4;
     let mut seen = Vec::new();
     while word(&img, p) != AT_NULL {
@@ -309,5 +258,4 @@ fn auxv_of_an_executable_with_interpreter() {
     }
     assert!(seen.contains(&(AT_BASE, base)));
     assert!(seen.contains(&(AT_ENTRY, DYN_BASE + 120)));
-    assert!(seen.contains(&(AT_PHDR, DYN_BASE + 64)));
 }

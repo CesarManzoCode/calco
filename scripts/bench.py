@@ -32,7 +32,6 @@ Outputs of each run stay in build/bench/<workload>/<mode>/.
 """
 
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -88,10 +87,6 @@ class Workload:
     files: list = field(default_factory=list)
 
 
-def sha256(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest() if Path(path).exists() else "missing"
-
-
 def run_step(step, prefix, logs, index):
     """Runs one process pinned to CORE; returns (outcome, seconds, maxrss_kb)."""
     stdout = step.stdout or logs / f"{index}.stdout"
@@ -105,7 +100,8 @@ def run_step(step, prefix, logs, index):
         _, status, usage = os.wait4(proc.pid, 0)
         seconds = time.perf_counter() - start
     proc.returncode = os.waitstatus_to_exitcode(status)
-    return (proc.returncode, sha256(stdout), sha256(stderr)), seconds, usage.ru_maxrss
+    return ((proc.returncode, common.sha256(stdout), common.sha256(stderr)), seconds,
+            usage.ru_maxrss)
 
 
 def run_workload(workload, mode, prefix):
@@ -119,7 +115,7 @@ def run_workload(workload, mode, prefix):
         outcome.append(got)
         seconds += secs
         rss = max(rss, kb)
-    outcome += [sha256(f) for f in workload.files]
+    outcome += [common.sha256(f) for f in workload.files]
     return outcome, {"seconds": seconds, "maxrss_kb": rss}
 
 

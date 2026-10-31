@@ -13,11 +13,6 @@ def sample(index=7, seed=0):
 
 
 class Format(unittest.TestCase):
-    def test_size(self):
-        self.assertEqual(dump.SIZE, 1280)
-        self.assertEqual(len(dump.pack(sample())), 1280)
-        self.assertEqual(dump.OFF_PAD + dump.PAD_SIZE, dump.SIZE)
-
     def test_round_trip(self):
         for seed in range(20):
             rec = sample(seed * 3, seed)
@@ -25,9 +20,11 @@ class Format(unittest.TestCase):
             self.assertEqual(dump.parse(data), rec)
             self.assertEqual(dump.pack(dump.parse(data)), data)
 
-    def test_offsets(self):
+    def test_size_and_offsets(self):
+        self.assertEqual((dump.SIZE, dump.OFF_PAD + dump.PAD_SIZE), (1280, 1280))
         rec = sample()
         data = dump.pack(rec)
+        self.assertEqual(len(data), 1280)
         self.assertEqual(data[:8], b"CALCODMP")
         self.assertEqual(int.from_bytes(data[8:12], "little"), rec.index)
         self.assertEqual(int.from_bytes(data[16 + 8 * 4 : 24 + 8 * 4], "little"), rec.gpr[4])
