@@ -1,8 +1,8 @@
-use super::BlockMap;
 use super::translate::*;
-use crate::cpu::{OFF_EXIT_REASON, OFF_NEXT_RIP};
-use crate::decode::{Insn, Map, decode};
-use crate::emit::RSI;
+use super::{BlockMap, LookupTable};
+use crate::cpu::{OFF_EXIT_REASON, OFF_NEXT_RIP, off_scratch};
+use crate::decode::{Class, Insn, Map, decode};
+use crate::emit::{RAX, RCX, RSI};
 
 /// Guest code of a static executable.
 const BASE: u64 = 0x40_1000;
@@ -12,6 +12,8 @@ const HIGH: u64 = 0x1000_0000_1000;
 const NEAR: u64 = 0x2000_0000;
 /// Host code more than 2 GiB away from both.
 const FAR: u64 = 0x7000_0000_0000;
+/// Address of the lookup table of indirect transfers.
+const LOOKUP_TABLE: u64 = 0x5555_0000_0000;
 
 struct Guest {
     base: u64,
@@ -47,6 +49,8 @@ fn env(host: u64) -> Env {
         host,
         exit_thunk: host - 0x100,
         indirect_exit: host - 0x80,
+        lookup_table: LOOKUP_TABLE,
+        cache_base: host - 0x100,
         first_exit_id: 7,
     }
 }
@@ -118,6 +122,10 @@ fn neutral(i: &Insn) -> bool {
     match (i.map, i.opcode) {
         (Map::OneByte, 0x87..=0x8b | 0x8d | 0x90..=0x97 | 0xa0..=0xa3 | 0xb8..=0xbf) => true,
         (Map::OneByte, 0xc7) => i.modrm.is_some_and(|m| (m >> 3) & 7 == 0),
+        // `jmp qword [m]` (FF /4), the probe's jump to the block it found.
+        (Map::OneByte, 0xff) => i.modrm.is_some_and(|m| (m >> 3) & 7 == 4),
+        // `movzx r32, word [m]`.
+        (Map::Map0F, 0xb7) => true,
         (Map::OneByte, 0xe0..=0xe3 | 0xe9 | 0xeb) => true,
         // `pop gs:[next_rip]` is the `ret` itself: it reads the guest stack, writes none.
         (Map::OneByte, 0x8f) => i.seg_gs,
@@ -297,10 +305,12 @@ fn pc_table_maps_host_code_to_guest_boundaries() {
         assert_eq!(e.pc, GuestPc::At(rip), "host instruction {k}");
         assert_eq!(e.temps, [None; SCRATCH_SLOTS]);
     }
-    // After `pop gs:[next_rip]` the guest is wherever `ret` goes.
-    let (off, jmp) = insns[5];
-    assert_eq!(jmp.opcode, 0xe9);
-    assert_eq!(t.lookup(off as u32).unwrap().pc, GuestPc::NextRip);
+    // After `pop gs:[next_rip]` the guest is wherever `ret` goes: the probe starts there,
+    // with no temporaries yet.
+    let (off, save) = insns[5];
+    assert_eq!((save.opcode, save.seg_gs), (0x89, true));
+    let e = t.lookup(off as u32).unwrap();
+    assert_eq!((e.pc, e.temps), (GuestPc::NextRip, [None; SCRATCH_SLOTS]));
 }
 
 #[test]
@@ -454,4 +464,226 @@ fn block_map_finds_grows_and_clears() {
     assert_eq!(m.get(0x40_0000), Some(99));
     m.clear();
     assert_eq!(m.get(0x40_0010), None);
+}
+
+/// Offset of the first host instruction of the probe: the save of RCX to scratch 0.
+fn probe_start(insns: &[(usize, Insn)]) -> usize {
+    insns
+        .iter()
+        .position(|(_, i)| {
+            i.seg_gs
+                && i.opcode == 0x89
+                && i.disp as usize == off_scratch(0)
+                && i.modrm.is_some_and(|m| (m >> 3) & 7 == RCX)
+        })
+        .expect("a probe")
+}
+
+/// `jmp rax; ret; call [rip+0x10]; ret 16`: every way into the probe.
+const INDIRECT: &[&[u8]] = &[
+    &[0xff, 0xe0],
+    &[0xc3],
+    &[0xff, 0x15, 0x10, 0x00, 0x00, 0x00],
+    &[0xc2, 0x10, 0x00],
+];
+
+#[test]
+fn probe_writes_no_flags_and_never_touches_the_guest_stack() {
+    for &bytes in INDIRECT {
+        for host in [NEAR, FAR] {
+            let g = Guest::new(BASE, bytes);
+            let t = tr(&g, host);
+            let insns = host_insns(&t, host);
+            let probe = &insns[probe_start(&insns)..];
+            for (off, i) in probe {
+                assert!(neutral(i), "{bytes:02x?}: host +{off:#x} {i:?}");
+                // No RSP-based operand: the probe reads only `Cpu` and the table.
+                let rsp_base = i.modrm.is_some_and(|m| m >> 6 != 3 && m & 7 == 4)
+                    && i.sib.is_some_and(|s| s & 7 == 4);
+                assert!(!rsp_base, "{bytes:02x?}: host +{off:#x} {i:?}");
+            }
+            let jrcxz = probe.iter().filter(|(_, i)| i.opcode == 0xe3).count();
+            assert_eq!(jrcxz, 2, "{bytes:02x?}");
+            // The two misses go to the indirect exit; the hit jumps through scratch 2.
+            let exits: Vec<u64> = probe
+                .iter()
+                .filter(|(_, i)| i.opcode == 0xe9)
+                .map(|(_, i)| i.target.unwrap())
+                .collect();
+            assert_eq!(exits, [host - 0x80, host - 0x80], "{bytes:02x?}");
+            let (_, last) = probe.last().unwrap();
+            assert_eq!((last.opcode, last.seg_gs), (0xff, true));
+            assert_eq!(last.disp as usize, off_scratch(2));
+            assert_eq!(last.class, Class::IndirectBranch);
+        }
+    }
+}
+
+#[test]
+fn probe_indexes_the_table_by_the_low_bits_and_compares_with_lea() {
+    let g = Guest::new(BASE, &[0xff, 0xe0]);
+    let t = tr(&g, NEAR);
+    let insns = host_insns(&t, NEAR);
+    let probe: Vec<Insn> = insns[probe_start(&insns)..]
+        .iter()
+        .map(|(_, i)| *i)
+        .collect();
+    let movzx: Vec<usize> = probe
+        .iter()
+        .filter(|i| i.map == Map::Map0F && i.opcode == 0xb7)
+        .map(|i| i.disp as usize)
+        .collect();
+    // Bits 48–63 first, then the slot (bits 0–15).
+    assert_eq!(movzx, [OFF_NEXT_RIP + 6, OFF_NEXT_RIP]);
+    let imm64: Vec<u64> = probe
+        .iter()
+        .filter(|i| i.opcode == 0xb8 && i.imm_size == 8)
+        .map(|i| i.imm)
+        .collect();
+    assert_eq!(imm64, [LOOKUP_TABLE, NEAR - 0x100]);
+    let code = |a: usize, b: usize| t.code[a..b].to_vec();
+    let at = |k: usize| insns[probe_start(&insns) + k].0;
+    // ... movzx ecx, word gs:[next_rip]; mov rax, table; mov rax, [rax+rcx*8];
+    // mov ecx, dword gs:[next_rip+2]; lea ecx, [rcx+rax]; jrcxz
+    let k = probe
+        .iter()
+        .position(|i| i.opcode == 0xb7 && i.disp as usize == OFF_NEXT_RIP)
+        .unwrap();
+    assert_eq!(code(at(k + 2), at(k + 3)), [0x48, 0x8b, 0x04, 0xc8]);
+    let load = probe[k + 3];
+    assert_eq!(
+        (load.opcode, load.seg_gs, load.disp as usize),
+        (0x8b, true, OFF_NEXT_RIP + 2)
+    );
+    assert_eq!(code(at(k + 4), at(k + 5)), [0x8d, 0x0c, 0x01]);
+    assert_eq!(probe[k + 5].opcode, 0xe3);
+}
+
+#[test]
+fn probe_pc_table_keeps_next_rip_and_its_temporaries() {
+    let n = [None; SCRATCH_SLOTS];
+    let c = [Some(RCX), None, None, None];
+    let b = [Some(RCX), Some(RAX), None, None];
+    // Temporaries in scratch at each host instruction of the probe.
+    #[rustfmt::skip]
+    let expect = [
+        n, // mov gs:[scratch0], rcx
+        c, // movzx ecx, word gs:[next_rip+6]
+        c, // jrcxz
+        c, // mov rcx, gs:[scratch0]
+        n, // jmp indirect_exit
+        c, // mov gs:[scratch1], rax
+        b, // movzx ecx, word gs:[next_rip]
+        b, // mov rax, table
+        b, // mov rax, [rax+rcx*8]
+        b, // mov ecx, dword gs:[next_rip+2]
+        b, // lea ecx, [rcx+rax]
+        b, // jrcxz
+        b, // mov rax, gs:[scratch1]
+        c, // mov rcx, gs:[scratch0]
+        n, // jmp indirect_exit
+        b, // mov gs:[scratch2], rax
+        b, // mov ecx, dword gs:[scratch2+4]
+        b, // mov rax, cache_base
+        b, // lea rcx, [rcx+rax]
+        b, // mov gs:[scratch2], rcx
+        b, // mov rax, gs:[scratch1]
+        c, // mov rcx, gs:[scratch0]
+        n, // jmp gs:[scratch2]
+    ];
+    for &bytes in INDIRECT {
+        let g = Guest::new(BASE, bytes);
+        let t = tr(&g, NEAR);
+        let insns = host_insns(&t, NEAR);
+        let probe = &insns[probe_start(&insns)..];
+        assert_eq!(probe.len(), expect.len(), "{bytes:02x?}");
+        for (k, ((off, _), temps)) in probe.iter().zip(expect).enumerate() {
+            let e = t.lookup(*off as u32).unwrap();
+            assert_eq!(
+                (e.pc, e.temps),
+                (GuestPc::NextRip, temps),
+                "{bytes:02x?}: {k}"
+            );
+        }
+        // Each `jrcxz` lands on the save or spill that follows a miss path.
+        for (k, (_, i)) in probe.iter().enumerate() {
+            if i.opcode == 0xe3 {
+                let landing = i.target.unwrap() - NEAR;
+                let next_miss = probe[k..]
+                    .iter()
+                    .position(|(_, j)| j.opcode == 0xe9)
+                    .unwrap();
+                assert_eq!(landing as usize, probe[k + next_miss + 1].0, "{bytes:02x?}");
+            }
+        }
+    }
+}
+
+/// What the probe does with `entry` for the guest `target`: the cache offset it jumps to,
+/// or `None` if it leaves to the dispatcher. The same steps as the emitted code.
+fn probe_hit(entry: u64, target: u64) -> Option<u32> {
+    if target >> 48 != 0 {
+        return None;
+    }
+    let ecx = ((target >> 16) as u32).wrapping_add(entry as u32);
+    (ecx == 0).then_some((entry >> 32) as u32)
+}
+
+#[test]
+fn lookup_entries_are_indexed_by_the_low_bits_and_published_whole() {
+    assert!(LOOKUP_SLOTS.is_power_of_two());
+    assert_eq!(
+        LOOKUP_SLOTS,
+        1 << 16,
+        "the probe takes the slot with movzx of a word"
+    );
+    const EXIT: u32 = 0x10;
+    let table = LookupTable::new(EXIT);
+    let rip = 0x1000_0040_1234u64;
+    assert_eq!(lookup_slot(rip), 0x1234);
+    // Free slots send every target to the indirect exit, low rips included.
+    for target in [rip, 0x1234, 0, 0x40_0000] {
+        assert_eq!(probe_hit(table.get(target), target), Some(EXIT));
+    }
+    table.set(rip, 0x4560);
+    let entry = table.get(rip);
+    assert_eq!(entry, lookup_entry(rip, 0x4560));
+    // The probe reads `[table + slot * 8]`.
+    let raw = unsafe { *((table.addr() + 8 * 0x1234) as *const u64) };
+    assert_eq!(raw, entry);
+    assert_eq!(probe_hit(entry, rip), Some(0x4560));
+    // Same slot, another rip; same bits 0–47 with bits 48–63 set.
+    assert_eq!(probe_hit(entry, rip + 0x1_0000), None);
+    assert_eq!(probe_hit(entry, rip + 0x10_0000_0000), None);
+    assert_eq!(probe_hit(entry, rip | 1 << 48), None);
+    assert_eq!(probe_hit(entry, rip | 0xffff << 48), None);
+    // A rip that shares the slot replaces the entry.
+    table.set(rip + 0x1_0000, 0x8000);
+    assert_eq!(probe_hit(table.get(rip), rip), None);
+    assert_eq!(probe_hit(table.get(rip), rip + 0x1_0000), Some(0x8000));
+    // Other slots are untouched.
+    assert_eq!(probe_hit(table.get(rip + 1), rip + 1), Some(EXIT));
+}
+
+#[test]
+fn invalidating_and_flushing_empty_the_lookup_table() {
+    const EXIT: u32 = 0x10;
+    let table = LookupTable::new(EXIT);
+    let (a, b) = (0x40_1000u64, 0x40_2008u64);
+    table.set(a, 0x100);
+    table.set(b, 0x200);
+    // A block that no longer owns its slot does not empty it.
+    table.remove(a, 0x180);
+    assert_eq!(probe_hit(table.get(a), a), Some(0x100));
+    table.remove(a, 0x100);
+    assert_eq!(probe_hit(table.get(a), a), Some(EXIT));
+    assert_eq!(probe_hit(table.get(b), b), Some(0x200));
+    // Replaced by another rip, then that rip's old block is invalidated: the new one stays.
+    table.set(b + 0x1_0000, 0x300);
+    table.remove(b, 0x200);
+    assert_eq!(probe_hit(table.get(b), b + 0x1_0000), Some(0x300));
+    table.clear();
+    for rip in [a, b, b + 0x1_0000] {
+        assert_eq!(probe_hit(table.get(rip), rip), Some(EXIT));
+    }
 }

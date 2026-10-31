@@ -501,6 +501,8 @@ fn translated(bytes: &[u8]) -> Translation {
         host: 0x2000_0000,
         exit_thunk: 0x2000_0000 - 0x100,
         indirect_exit: 0x2000_0000 - 0x80,
+        lookup_table: 0x5000_0000,
+        cache_base: 0x2000_0000 - 0x100,
         first_exit_id: 0,
     };
     translate(&Guest(bytes.to_vec()), BASE, &env).unwrap()

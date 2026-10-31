@@ -18,6 +18,10 @@
 //! incoming and outgoing chains point back at their stubs and its rip leaves the table
 //! (a tombstone), but its code and pc table stay until the next flush, so a thread still
 //! inside it ends it and the signal handler can still read its state.
+//!
+//! Indirect transfers and `ret` probe a direct-mapped table `rip → code` inline
+//! (`LookupTable`, contract 3.7); on a miss they leave to the dispatcher, which fills the
+//! slot under the lock. Invalidating a block empties its slot; a flush empties them all.
 
 pub mod trampoline;
 pub mod translate;
@@ -40,7 +44,7 @@ use crate::thread::{self, Member};
 
 use self::translate::{
     EXIT_BRANCH, EXIT_CPUID, EXIT_INDIRECT, EXIT_INTERRUPTED, EXIT_SIGNAL, EXIT_SYSCALL, Env,
-    Fault, GuestCode, PcEntry, Translation,
+    Fault, GuestCode, LOOKUP_SLOTS, PcEntry, Translation, lookup_entry, lookup_slot,
 };
 
 /// Space kept free after the start area: the exit thunk and the indirect exit.
@@ -187,6 +191,61 @@ impl BlockMap {
     }
 }
 
+/// Direct-mapped table `guest rip → host code` that the inline probe of indirect transfers
+/// reads without the cache lock (contract 3.7, 3.12). Each slot is one word in the format of
+/// `translate::lookup_entry`, written with the lock held and published with one atomic
+/// store, so the probe reads either the old entry or the new one, never a mix. A free slot
+/// holds `empty`, an entry whose code is the indirect exit: whatever matches it goes to the
+/// dispatcher.
+pub struct LookupTable {
+    slots: Box<[AtomicU64]>,
+    empty: u64,
+}
+
+impl LookupTable {
+    /// A table whose free slots send the probe to the cache offset `indirect_exit`.
+    pub fn new(indirect_exit: u32) -> LookupTable {
+        let empty = lookup_entry(0, indirect_exit);
+        LookupTable {
+            slots: (0..LOOKUP_SLOTS).map(|_| AtomicU64::new(empty)).collect(),
+            empty,
+        }
+    }
+
+    /// Address of the first slot, for the probe.
+    pub fn addr(&self) -> u64 {
+        self.slots.as_ptr() as u64
+    }
+
+    /// The entry in the slot of `rip`.
+    #[cfg(test)]
+    pub fn get(&self, rip: u64) -> u64 {
+        self.slots[lookup_slot(rip)].load(Ordering::Acquire)
+    }
+
+    /// Points the slot of `rip` at the code `host_off` bytes into the cache, replacing what
+    /// shared the slot. Only with the cache lock held.
+    pub fn set(&self, rip: u64, host_off: u32) {
+        self.slots[lookup_slot(rip)].store(lookup_entry(rip, host_off), Ordering::Release);
+    }
+
+    /// Empties the slot of `rip` if it still points at `host_off`. Only with the cache lock
+    /// held.
+    pub fn remove(&self, rip: u64, host_off: u32) {
+        let slot = &self.slots[lookup_slot(rip)];
+        if slot.load(Ordering::Relaxed) == lookup_entry(rip, host_off) {
+            slot.store(self.empty, Ordering::Release);
+        }
+    }
+
+    /// Empties every slot. Only at a safe point.
+    pub fn clear(&self) {
+        for slot in self.slots.iter() {
+            slot.store(self.empty, Ordering::Relaxed);
+        }
+    }
+}
+
 /// The part of the cache that threads read without its lock: the lookup table, the blocks
 /// of the current generation and that generation. What it returns is valid while the
 /// reading thread is in the cache (`thread::enter_cache`): no flush ends meanwhile.
@@ -194,6 +253,7 @@ pub struct Index {
     start: u64,
     end: u64,
     map: BlockMap,
+    lookup: LookupTable,
     /// Base of the block list of `Jit`, allocated once (capacity `MAX_BLOCKS`).
     blocks: AtomicPtr<Block>,
     /// Blocks `[0, published)` are complete.
@@ -263,6 +323,8 @@ impl GuestCode for Mem {
 }
 
 pub struct Jit {
+    /// Start of the arena: the exit thunk, and what lookup table offsets count from.
+    base: u64,
     start: u64,
     end: u64,
     /// Next free byte of the arena.
@@ -316,11 +378,13 @@ impl Jit {
             start: base + START_AREA,
             end: base + CODE_CACHE_SIZE,
             map: BlockMap::new(),
+            lookup: LookupTable::new((indirect_exit - base) as u32),
             blocks: AtomicPtr::new(blocks.as_mut_ptr()),
             published: AtomicUsize::new(0),
             generation: AtomicU64::new(0),
         }));
         Ok(Jit {
+            base,
             start: base + START_AREA,
             end: base + CODE_CACHE_SIZE,
             top: base + START_AREA,
@@ -390,6 +454,8 @@ impl Jit {
             host: self.top,
             exit_thunk: self.exit_thunk,
             indirect_exit: self.indirect_exit,
+            lookup_table: self.index.lookup.addr(),
+            cache_base: self.base,
             first_exit_id: self.exits.len() as u32,
         };
         translate::translate_max(mem, rip, &env, max)
@@ -430,6 +496,16 @@ impl Jit {
             self.index.map.insert(t.rip, id);
         }
         id
+    }
+
+    /// Publishes live block `id` in the lookup table of indirect transfers, after the probe
+    /// missed its rip.
+    pub fn fill_lookup(&mut self, id: u32) {
+        if self.dead[id as usize] {
+            return;
+        }
+        let b = &self.blocks[id as usize];
+        self.index.lookup.set(b.rip, (b.host - self.base) as u32);
     }
 
     /// Whether block `id` was invalidated or is a one-instruction block.
@@ -475,13 +551,16 @@ impl Jit {
         inv.blocks
     }
 
-    /// Unlinks block `id` both ways and takes its rip out of the table. Its code stays: a
-    /// thread inside it ends it and then leaves to the dispatcher (contract 3.13).
+    /// Unlinks block `id` both ways and takes its rip out of the table and of the lookup
+    /// table. Its code stays: a thread inside it, or past a probe that read it just before,
+    /// ends it and then leaves to the dispatcher (contract 3.13).
     fn kill(&mut self, id: u32) {
         if std::mem::replace(&mut self.dead[id as usize], true) {
             return;
         }
-        self.index.map.remove(self.blocks[id as usize].rip);
+        let b = &self.blocks[id as usize];
+        self.index.map.remove(b.rip);
+        self.index.lookup.remove(b.rip, (b.host - self.base) as u32);
         self.unlink_incoming(id);
         self.unlink_outgoing(id);
     }
@@ -500,6 +579,7 @@ impl Jit {
             self.exits.clear();
             self.dead.clear();
             index.map.clear();
+            index.lookup.clear();
             index.publish(&mut self.blocks);
             self.top = self.start;
             self.generation += 1;
@@ -560,6 +640,8 @@ pub fn run(cpu: &mut Cpu, me: &Arc<Member>) -> u64 {
     let index = thread::shared().index;
     // Exit to chain to the next block, with the generation it belongs to.
     let mut chain: Option<(u32, u64)> = None;
+    // The probe of an indirect transfer missed `cpu.rip`: its slot gets filled.
+    let mut fill = false;
     loop {
         if cpu.smc_write != 0 {
             deferred_write(cpu);
@@ -572,9 +654,10 @@ pub fn run(cpu: &mut Cpu, me: &Arc<Member>) -> u64 {
         thread::enter_cache(me);
         // Resuming at a write that invalidated its own block: that instruction runs alone.
         let step = core::mem::take(&mut cpu.smc_step) == cpu.rip;
+        let filling = core::mem::take(&mut fill);
         let host = match index.lookup(cpu.rip) {
-            Some((_, host)) if chain.is_none() && !step => host,
-            _ => match locked_block(cpu, me, chain.take(), step) {
+            Some((_, host)) if chain.is_none() && !step && !filling => host,
+            _ => match locked_block(cpu, me, chain.take(), step, filling) {
                 Some(host) => host,
                 None => continue,
             },
@@ -588,7 +671,7 @@ pub fn run(cpu: &mut Cpu, me: &Arc<Member>) -> u64 {
         let kind = reason as u32;
         match kind & 0xff {
             EXIT_BRANCH => chain = Some(((reason >> 32) as u32, generation)),
-            EXIT_INDIRECT => {}
+            EXIT_INDIRECT => fill = true,
             // The end of a guest thread is `thread.rs`'s business.
             EXIT_SYSCALL if cpu.gpr[RAX] == syscall::EXIT => return cpu.gpr[RDI],
             EXIT_SYSCALL => syscall::handle(cpu, me),
@@ -603,9 +686,16 @@ pub fn run(cpu: &mut Cpu, me: &Arc<Member>) -> u64 {
 /// The host code of the block at `cpu.rip`, under the cache lock: translated if no thread
 /// did it meanwhile, and with the exit `chain` linked to it if it is of this generation.
 /// With `step`, a one-instruction block made for this run only (contract 3.13). `None` if
-/// the code cannot be fetched; the guest then gets the fault. The thread is in the cache
-/// when this returns `Some`.
-fn locked_block(cpu: &mut Cpu, me: &Member, chain: Option<(u32, u64)>, step: bool) -> Option<u64> {
+/// the code cannot be fetched; the guest then gets the fault. With `fill`, the block goes
+/// into the lookup table of indirect transfers. The thread is in the cache when this
+/// returns `Some`.
+fn locked_block(
+    cpu: &mut Cpu,
+    me: &Member,
+    chain: Option<(u32, u64)>,
+    step: bool,
+    fill: bool,
+) -> Option<u64> {
     let shared = thread::shared();
     // A thread waiting for the lock is out of the cache, so a flush does not wait for it.
     thread::leave_cache(me);
@@ -636,6 +726,9 @@ fn locked_block(cpu: &mut Cpu, me: &Member, chain: Option<(u32, u64)>, step: boo
         && generation == jit.generation()
     {
         jit.link(exit, block);
+    }
+    if fill {
+        jit.fill_lookup(block);
     }
     Some(jit.block(block).host)
 }

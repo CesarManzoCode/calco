@@ -273,6 +273,29 @@ impl Asm {
         self.mov_load(dst, &Mem::abs(off as i32));
     }
 
+    /// `lea dst32, [m]`: the low 32 bits of the address, zero-extended.
+    pub fn lea32(&mut self, dst: Reg, m: &Mem) {
+        self.op_mem(false, &[], 0x8d, dst, m);
+    }
+
+    /// `mov dst32, dword gs:[off]`, zero-extended.
+    pub fn mov_gs_load32(&mut self, dst: Reg, off: usize) {
+        self.byte(PREFIX_GS);
+        self.op_mem(false, &[], 0x8b, dst, &Mem::abs(off as i32));
+    }
+
+    /// `movzx dst32, word gs:[off]`.
+    pub fn movzx_gs_word(&mut self, dst: Reg, off: usize) {
+        self.byte(PREFIX_GS);
+        self.op_mem(false, &[0x0f], 0xb7, dst, &Mem::abs(off as i32));
+    }
+
+    /// `jmp qword gs:[off]`.
+    pub fn jmp_gs(&mut self, off: usize) {
+        self.byte(PREFIX_GS);
+        self.op_mem(false, &[], 0xff, 4, &Mem::abs(off as i32));
+    }
+
     /// `mov dword gs:[off], imm32`.
     pub fn mov_gs_dword(&mut self, off: usize, imm: u32) {
         self.byte(PREFIX_GS);

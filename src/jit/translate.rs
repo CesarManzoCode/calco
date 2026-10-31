@@ -3,8 +3,9 @@
 //! through `GuestCode` and returns bytes plus metadata; `Jit` installs them.
 //!
 //! Invariants every expansion keeps (contract 3.3, 3.6):
-//! - Inserted code only uses `mov`, `lea`, `jmp`, `jcc`/`loop`/`jrcxz` of the guest, `nop`
-//!   and `pop gs:[next_rip]` (the `ret` itself): RFLAGS stay exactly what the guest left.
+//! - Inserted code only uses `mov`, `movzx`, `lea`, `jmp`, `jrcxz`, `jcc`/`loop`/`jrcxz` of
+//!   the guest, `nop` and `pop gs:[next_rip]` (the `ret` itself): RFLAGS stay exactly what
+//!   the guest left.
 //! - Nothing is pushed or called on the guest stack; the only store below the guest RSP is
 //!   the return address of a guest `call`, which the guest instruction writes anyway.
 //! - A temporary register is saved in `gs:[scratch]` before use and restored after, and
@@ -44,6 +45,24 @@ pub const fn exit_signal(sig: i32) -> u32 {
     EXIT_SIGNAL | (sig as u32) << 8
 }
 
+/// Entries of the lookup table of indirect transfers (contract 3.7): one per value of the
+/// low 16 bits of the guest rip, which the probe takes with `movzx`.
+pub const LOOKUP_SLOTS: usize = 1 << 16;
+
+/// Slot of `rip` in the lookup table.
+pub const fn lookup_slot(rip: u64) -> usize {
+    rip as usize & (LOOKUP_SLOTS - 1)
+}
+
+/// Entry of the lookup table for the block at guest `rip` whose code is `host_off` bytes
+/// past the start of the code cache. One word, so a reader sees a whole entry: the low
+/// dword is minus bits 16–47 of the rip (bits 0–15 are the slot, and the probe sends rips
+/// with bits 48–63 to the dispatcher), the high dword is `host_off`. A guest code rip is
+/// below 2^47.
+pub const fn lookup_entry(rip: u64, host_off: u32) -> u64 {
+    ((host_off as u64) << 32) | ((rip >> 16) as u32).wrapping_neg() as u64
+}
+
 /// Guest code as the translator sees it.
 pub trait GuestCode {
     /// Copies to `buf` the bytes at `rip` that are in logically executable guest memory, up
@@ -59,6 +78,10 @@ pub struct Env {
     pub exit_thunk: u64,
     /// Shared exit for indirect transfers: sets `EXIT_INDIRECT` and goes to the thunk.
     pub indirect_exit: u64,
+    /// Address of the lookup table of indirect transfers (`LOOKUP_SLOTS` words).
+    pub lookup_table: u64,
+    /// Start of the code cache, which the offsets of the lookup table count from.
+    pub cache_base: u64,
     /// Id of the first chainable exit of this block; the rest follow in order.
     pub first_exit_id: u32,
 }
@@ -305,8 +328,7 @@ impl Tr<'_> {
             }
             Class::IndirectBranch => {
                 self.load_target(insn);
-                self.mark(GuestPc::NextRip);
-                self.asm.jmp_rel32(self.env.indirect_exit);
+                self.indirect();
                 true
             }
             Class::Syscall => {
@@ -454,8 +476,7 @@ impl Tr<'_> {
                 // The target is read before RSP moves, as the CPU does.
                 self.load_target(insn);
                 self.push_return(insn.rip, ret);
-                self.mark(GuestPc::NextRip);
-                self.asm.jmp_rel32(self.env.indirect_exit);
+                self.indirect();
             }
         }
     }
@@ -476,8 +497,71 @@ impl Tr<'_> {
         } else {
             self.asm.pop_gs(OFF_NEXT_RIP);
         }
-        self.mark(GuestPc::NextRip);
+        self.indirect();
+    }
+
+    /// Goes to the guest rip in `gs:[next_rip]` (contract 3.7): an inline probe of the lookup
+    /// table jumps straight to its block if the slot holds it, otherwise it leaves through
+    /// the indirect exit and the dispatcher fills the slot. RCX (scratch 0) carries the
+    /// value `jrcxz` tests and RAX (scratch 1) the entry; scratch 2 holds the host target of
+    /// the final `jmp`, after both are back. Only `mov`, `movzx`, `lea`, `jrcxz` and `jmp`:
+    /// no flags, nothing on the guest stack. The whole probe is at the boundary `NextRip`.
+    fn indirect(&mut self) {
+        let pc = GuestPc::NextRip;
+        self.mark(pc);
+        self.save(0, RCX, pc);
+        // A rip with bits 48–63 set is never in the table (the entry key is bits 16–47).
+        self.asm.movzx_gs_word(RCX, OFF_NEXT_RIP + 6);
+        let low_half = self.jrcxz_fwd();
+        self.restore(0, pc);
         self.asm.jmp_rel32(self.env.indirect_exit);
+
+        self.land(low_half, &[RCX]);
+        self.save(1, RAX, pc);
+        self.asm.movzx_gs_word(RCX, OFF_NEXT_RIP);
+        self.asm.mov_imm64(RAX, self.env.lookup_table);
+        let slot = Mem {
+            base: Some(RAX),
+            index: Some(RCX),
+            scale: 3,
+            disp: 0,
+        };
+        self.asm.mov_load(RAX, &slot);
+        // ecx = bits 16–47 of the target plus the low dword of the entry: 0 if they match.
+        self.asm.mov_gs_load32(RCX, OFF_NEXT_RIP + 2);
+        self.asm.lea32(RCX, &Mem::base_index(RCX, RAX));
+        let hit = self.jrcxz_fwd();
+        self.restore(1, pc);
+        self.restore(0, pc);
+        self.asm.jmp_rel32(self.env.indirect_exit);
+
+        self.land(hit, &[RCX, RAX]);
+        // The high dword of the entry, through scratch, plus the cache base.
+        self.asm.mov_gs_store(off_scratch(2), RAX);
+        self.asm.mov_gs_load32(RCX, off_scratch(2) + 4);
+        self.asm.mov_imm64(RAX, self.env.cache_base);
+        self.asm.lea(RCX, &Mem::base_index(RCX, RAX));
+        self.asm.mov_gs_store(off_scratch(2), RCX);
+        self.restore(1, pc);
+        self.restore(0, pc);
+        self.asm.jmp_gs(off_scratch(2));
+    }
+
+    /// `jrcxz` to a label set later with `land`; returns the offset of its rel8.
+    fn jrcxz_fwd(&mut self) -> usize {
+        self.asm.jrcxz(0);
+        self.asm.len() - 1
+    }
+
+    /// Places the target of the `jrcxz` at `rel8` here, where scratch 0, 1… hold `regs`.
+    fn land(&mut self, rel8: usize, regs: &[Reg]) {
+        let here = self.asm.len();
+        self.asm.set_rel8(rel8, here);
+        self.temps = [None; SCRATCH_SLOTS];
+        for (slot, &reg) in regs.iter().enumerate() {
+            self.temps[slot] = Some(reg);
+        }
+        self.mark(GuestPc::NextRip);
     }
 
     fn branch(&mut self, insn: &Insn) {
